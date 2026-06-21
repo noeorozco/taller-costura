@@ -20,6 +20,10 @@ export default function RootLayout({ children }) {
           }}
         >
           <a href="/dashboard">Dashboard</a>
+          <a href="/preparacion">Preparación</a>
+          <a href="/rapido-v2">Rápido V2</a>
+          <a href="/administracion">Administración</a>
+
           <a href="/empleado">Empleado</a>
           <a href="/produccion">Producción</a>
           <a href="/estado-bultos">Estado bultos</a>
@@ -36,8 +40,6 @@ export default function RootLayout({ children }) {
           <a href="/perfil-empleado">Perfil empleado</a>
           <a href="/login">Login</a>
           <a href="/rapido">Captura rápida</a>
-          <a href="/rapido-v2">Rápido V2</a>
-          <a href="/preparacion">Preparación</a>
         </nav>
 
         {children}
