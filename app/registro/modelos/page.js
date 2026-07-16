@@ -415,8 +415,11 @@ export default function ModelosPage() {
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "330px minmax(0, 1fr)",
-          gap: 20,
+gridTemplateColumns:
+  window.innerWidth < 900
+    ? "1fr"
+    : "330px minmax(0,1fr)",
+gap: 20,
         }}
       >
         <section style={card}>
@@ -501,9 +504,12 @@ export default function ModelosPage() {
           <div
             style={{
               display: "grid",
-              gridTemplateColumns: "220px minmax(0, 1fr)",
-              gap: 20,
-              alignItems: "start",
+gridTemplateColumns:
+  window.innerWidth < 900
+    ? "1fr"
+    : "220px minmax(0,1fr)",
+gap: 20,
+alignItems: "start",
             }}
           >
             <div>
@@ -856,7 +862,10 @@ const contenedorFoto = {
 
 const resumen = {
   display: "grid",
-  gridTemplateColumns: "repeat(3, minmax(0, 1fr))",
+  gridTemplateColumns:
+    typeof window !== "undefined" && window.innerWidth < 900
+      ? "1fr"
+      : "repeat(3,minmax(0,1fr))",
   gap: 12,
   marginBottom: 20,
 };
