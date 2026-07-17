@@ -100,10 +100,20 @@ export default function AsignacionesPage() {
 
   function ordenarAsignados(lista) {
     return [...lista].sort((a, b) => {
-      const bultoA = a.orden_bultos_v2?.nombre_bulto || "";
-      const bultoB = b.orden_bultos_v2?.nombre_bulto || "";
+      const bultoA =
+        a.orden_bultos_v2?.nombre_bulto || "";
 
-      return obtenerNumeroBulto(bultoA) - obtenerNumeroBulto(bultoB);
+      const bultoB =
+        b.orden_bultos_v2?.nombre_bulto || "";
+
+      if (bultoA !== bultoB) {
+        return (
+          obtenerNumeroBulto(bultoA) -
+          obtenerNumeroBulto(bultoB)
+        );
+      }
+
+      return Number(a.proceso_id || 0) - Number(b.proceso_id || 0);
     });
   }
 
@@ -125,7 +135,9 @@ export default function AsignacionesPage() {
 
     if (!id) return;
 
-    const orden = ordenes.find((o) => Number(o.id) === Number(id));
+    const orden = ordenes.find(
+      (o) => Number(o.id) === Number(id)
+    );
 
     if (!orden) return;
 
@@ -150,18 +162,28 @@ export default function AsignacionesPage() {
       return;
     }
 
-    const { data: asig, error: errorAsignaciones } = await supabase
-      .from("asignaciones")
-      .select(
-        `
-        *,
-        empleados(nombre,alias),
-        modelo_procesos(nombre),
-        orden_bultos_v2(nombre_bulto,talla,cantidad)
-        `
-      )
-      .eq("orden_id", Number(id))
-      .eq("estado", "Asignado");
+    /*
+      Cargamos tanto asignaciones activas como terminadas.
+
+      Esto permite bloquear únicamente la combinación:
+      bulto + proceso.
+
+      Un mismo bulto puede estar simultáneamente en procesos
+      diferentes, pero no se podrá repetir el mismo proceso.
+    */
+    const { data: asig, error: errorAsignaciones } =
+      await supabase
+        .from("asignaciones")
+        .select(
+          `
+          *,
+          empleados(nombre,alias),
+          modelo_procesos(nombre),
+          orden_bultos_v2(nombre_bulto,talla,cantidad)
+          `
+        )
+        .eq("orden_id", Number(id))
+        .in("estado", ["Asignado", "Terminado"]);
 
     if (errorAsignaciones) {
       alert(errorAsignaciones.message);
@@ -179,7 +201,19 @@ export default function AsignacionesPage() {
     setDescripcionTiempo("");
   }
 
+  function cambiarProceso(nuevoProcesoId) {
+    setProcesoId(nuevoProcesoId);
+
+    /*
+      Al cambiar de proceso limpiamos la selección anterior,
+      porque la disponibilidad de los bultos puede cambiar.
+    */
+    setSeleccionados([]);
+  }
+
   function cambiarBulto(id) {
+    if (bultoEstaAsignado(id)) return;
+
     setSeleccionados((actual) =>
       actual.includes(id)
         ? actual.filter((x) => x !== id)
@@ -187,18 +221,59 @@ export default function AsignacionesPage() {
     );
   }
 
+  /*
+    CAMBIO PRINCIPAL:
+
+    Un bulto se considera bloqueado únicamente cuando
+    ya tiene asignado el proceso actualmente seleccionado.
+
+    Ejemplo:
+    CH1 + Armar cuello = bloqueado
+    CH1 + Over espalda = todavía disponible
+  */
   function bultoEstaAsignado(bultoId) {
+    if (!procesoId) return false;
+
     return asignados.some(
-      (a) => Number(a.orden_bulto_id) === Number(bultoId)
+      (asignacion) =>
+        Number(asignacion.orden_bulto_id) ===
+          Number(bultoId) &&
+        Number(asignacion.proceso_id) ===
+          Number(procesoId) &&
+        ["Asignado", "Terminado"].includes(asignacion.estado)
+    );
+  }
+
+  function obtenerAsignacionDelProceso(bultoId) {
+    if (!procesoId) return null;
+
+    return asignados.find(
+      (asignacion) =>
+        Number(asignacion.orden_bulto_id) ===
+          Number(bultoId) &&
+        Number(asignacion.proceso_id) ===
+          Number(procesoId) &&
+        ["Asignado", "Terminado"].includes(asignacion.estado)
     );
   }
 
   function bultosDisponibles() {
-    return bultos.filter((b) => !bultoEstaAsignado(b.id));
+    if (!procesoId) return [];
+
+    return bultos.filter(
+      (bulto) => !bultoEstaAsignado(bulto.id)
+    );
   }
 
   function seleccionarTodo() {
-    setSeleccionados(bultosDisponibles().map((b) => b.id));
+    if (!procesoId) {
+      alert("Primero selecciona un proceso");
+      return;
+    }
+
+    setSeleccionados(
+      bultosDisponibles().map((bulto) => bulto.id)
+    );
   }
 
   function quitarSeleccion() {
@@ -206,13 +281,20 @@ export default function AsignacionesPage() {
   }
 
   function seleccionarTalla(talla) {
+    if (!procesoId) {
+      alert("Primero selecciona un proceso");
+      return;
+    }
+
     const idsTalla = bultosDisponibles()
-      .filter((b) => b.talla === talla)
-      .map((b) => b.id);
+      .filter((bulto) => bulto.talla === talla)
+      .map((bulto) => bulto.id);
 
     const todosSeleccionados =
       idsTalla.length > 0 &&
-      idsTalla.every((id) => seleccionados.includes(id));
+      idsTalla.every((id) =>
+        seleccionados.includes(id)
+      );
 
     if (todosSeleccionados) {
       setSeleccionados((actual) =>
@@ -226,15 +308,29 @@ export default function AsignacionesPage() {
   }
 
   const tallasDisponibles = [
-    ...new Set(bultosDisponibles().map((b) => b.talla)),
+    ...new Set(
+      bultosDisponibles()
+        .map((bulto) => bulto.talla)
+        .filter(Boolean)
+    ),
   ];
 
   const empleadoSeleccionado = empleados.find(
-    (e) => Number(e.id) === Number(empleadoId)
+    (empleado) =>
+      Number(empleado.id) === Number(empleadoId)
   );
 
   const tarifaEmpleado = Number(
     empleadoSeleccionado?.pago_hora || 0
+  );
+
+  const procesoSeleccionado = procesos.find(
+    (proceso) =>
+      Number(proceso.id) === Number(procesoId)
+  );
+
+  const asignadosActivos = asignados.filter(
+    (asignacion) => asignacion.estado === "Asignado"
   );
 
   async function asignarBultos() {
@@ -244,20 +340,66 @@ export default function AsignacionesPage() {
       !empleadoId ||
       seleccionados.length === 0
     ) {
-      alert("Selecciona orden, proceso, trabajador y bultos");
+      alert(
+        "Selecciona orden, proceso, trabajador y bultos"
+      );
       return;
     }
 
     setGuardando(true);
 
     try {
-      const registros = seleccionados.map((bultoId) => ({
-        orden_id: Number(ordenId),
-        orden_bulto_id: Number(bultoId),
-        proceso_id: Number(procesoId),
-        empleado_id: Number(empleadoId),
-        estado: "Asignado",
-      }));
+      /*
+        Volvemos a consultar Supabase justo antes de guardar.
+        Así evitamos duplicar una combinación si otro usuario
+        la asignó segundos antes desde otro dispositivo.
+      */
+      const { data: coincidencias, error: errorConsulta } =
+        await supabase
+          .from("asignaciones")
+          .select(
+            "id, orden_bulto_id, proceso_id, estado"
+          )
+          .eq("orden_id", Number(ordenId))
+          .eq("proceso_id", Number(procesoId))
+          .in("orden_bulto_id", seleccionados)
+          .in("estado", ["Asignado", "Terminado"]);
+
+      if (errorConsulta) throw errorConsulta;
+
+      if ((coincidencias || []).length > 0) {
+        const idsOcupados = new Set(
+          coincidencias.map((registro) =>
+            Number(registro.orden_bulto_id)
+          )
+        );
+
+        const nombresOcupados = bultos
+          .filter((bulto) =>
+            idsOcupados.has(Number(bulto.id))
+          )
+          .map((bulto) => bulto.nombre_bulto)
+          .join(", ");
+
+        alert(
+          `No se pudo completar la asignación.\n\n` +
+            `El proceso "${procesoSeleccionado?.nombre || "seleccionado"}" ` +
+            `ya está asignado o terminado en: ${nombresOcupados}.`
+        );
+
+        await cargarOrden(ordenId);
+        return;
+      }
+
+      const registros = seleccionados.map(
+        (bultoId) => ({
+          orden_id: Number(ordenId),
+          orden_bulto_id: Number(bultoId),
+          proceso_id: Number(procesoId),
+          empleado_id: Number(empleadoId),
+          estado: "Asignado",
+        })
+      );
 
       const { error } = await supabase
         .from("asignaciones")
@@ -265,13 +407,15 @@ export default function AsignacionesPage() {
 
       if (error) throw error;
 
-      const movimientos = seleccionados.map((bultoId) => ({
-        orden_id: Number(ordenId),
-        orden_bulto_id: Number(bultoId),
-        proceso_id: Number(procesoId),
-        empleado_id: Number(empleadoId),
-        tipo: "Asignado",
-      }));
+      const movimientos = seleccionados.map(
+        (bultoId) => ({
+          orden_id: Number(ordenId),
+          orden_bulto_id: Number(bultoId),
+          proceso_id: Number(procesoId),
+          empleado_id: Number(empleadoId),
+          tipo: "Asignado",
+        })
+      );
 
       const { error: errorMovimientos } = await supabase
         .from("movimientos_bulto")
@@ -280,11 +424,23 @@ export default function AsignacionesPage() {
       if (errorMovimientos) throw errorMovimientos;
 
       setSeleccionados([]);
-      mostrarMensaje("Bultos asignados correctamente");
+
+      mostrarMensaje(
+        `Proceso "${procesoSeleccionado?.nombre || ""}" asignado correctamente`
+      );
 
       await cargarOrden(ordenId);
+
+      /*
+        cargarOrden limpia el proceso. Lo restauramos para que
+        puedas continuar asignando el mismo paso a más bultos.
+      */
+      setProcesoId(String(procesoId));
     } catch (error) {
-      alert(error.message || "No se pudieron asignar los bultos");
+      alert(
+        error.message ||
+          "No se pudieron asignar los bultos"
+      );
     } finally {
       setGuardando(false);
     }
@@ -297,7 +453,9 @@ export default function AsignacionesPage() {
     }
 
     if (!descripcionTiempo.trim()) {
-      alert("Escribe la actividad que realizará el trabajador");
+      alert(
+        "Escribe la actividad que realizará el trabajador"
+      );
       return;
     }
 
@@ -330,8 +488,12 @@ export default function AsignacionesPage() {
 
       const datos = {
         empleado_id: Number(empleadoId),
-        orden_id: ordenId ? Number(ordenId) : null,
-        proceso_id: procesoId ? Number(procesoId) : null,
+        orden_id: ordenId
+          ? Number(ordenId)
+          : null,
+        proceso_id: procesoId
+          ? Number(procesoId)
+          : null,
         descripcion: descripcionTiempo.trim(),
         tarifa_hora: tarifaEmpleado,
         fecha_inicio: new Date().toISOString(),
@@ -348,11 +510,16 @@ export default function AsignacionesPage() {
       setEmpleadoId("");
       setProcesoId("");
 
-      mostrarMensaje("Trabajo por hora iniciado correctamente");
+      mostrarMensaje(
+        "Trabajo por hora iniciado correctamente"
+      );
 
       await cargarTrabajosTiempo();
     } catch (error) {
-      alert(error.message || "No se pudo iniciar el trabajo");
+      alert(
+        error.message ||
+          "No se pudo iniciar el trabajo"
+      );
     } finally {
       setGuardando(false);
     }
@@ -372,6 +539,7 @@ export default function AsignacionesPage() {
 
     const inicio = new Date(fechaInicio).getTime();
     const ahora = Date.now();
+
     const minutos = Math.max(
       0,
       Math.floor((ahora - inicio) / 60000)
@@ -387,7 +555,11 @@ export default function AsignacionesPage() {
     <div>
       <h1>📋 Asignaciones</h1>
 
-      {mensaje && <div style={alerta}>{mensaje}</div>}
+      {mensaje && (
+        <div style={alerta}>
+          {mensaje}
+        </div>
+      )}
 
       <section style={card}>
         <h2>Asignar trabajo</h2>
@@ -399,8 +571,13 @@ export default function AsignacionesPage() {
             style={{
               ...botonTipo,
               background:
-                tipoPago === "pieza" ? "#16a34a" : "#e5e7eb",
-              color: tipoPago === "pieza" ? "white" : "black",
+                tipoPago === "pieza"
+                  ? "#16a34a"
+                  : "#e5e7eb",
+              color:
+                tipoPago === "pieza"
+                  ? "white"
+                  : "black",
             }}
           >
             🧵 Pago por pieza
@@ -412,19 +589,28 @@ export default function AsignacionesPage() {
             style={{
               ...botonTipo,
               background:
-                tipoPago === "hora" ? "#2563eb" : "#e5e7eb",
-              color: tipoPago === "hora" ? "white" : "black",
+                tipoPago === "hora"
+                  ? "#2563eb"
+                  : "#e5e7eb",
+              color:
+                tipoPago === "hora"
+                  ? "white"
+                  : "black",
             }}
           >
             ⏱ Pago por hora
           </button>
         </div>
 
-        <label style={etiqueta}>Orden de producción</label>
+        <label style={etiqueta}>
+          Orden de producción
+        </label>
 
         <select
           value={ordenId}
-          onChange={(e) => cargarOrden(e.target.value)}
+          onChange={(e) =>
+            cargarOrden(e.target.value)
+          }
           style={input}
         >
           <option value="">
@@ -433,10 +619,14 @@ export default function AsignacionesPage() {
               : "Selecciona orden"}
           </option>
 
-          {ordenes.map((o) => (
-            <option key={o.id} value={o.id}>
-              {o.folio} - {o.modelos?.codigo} -{" "}
-              {o.cliente || "Sin cliente"}
+          {ordenes.map((orden) => (
+            <option
+              key={orden.id}
+              value={orden.id}
+            >
+              {orden.folio} -{" "}
+              {orden.modelos?.codigo} -{" "}
+              {orden.cliente || "Sin cliente"}
             </option>
           ))}
         </select>
@@ -449,7 +639,9 @@ export default function AsignacionesPage() {
 
         <select
           value={procesoId}
-          onChange={(e) => setProcesoId(e.target.value)}
+          onChange={(e) =>
+            cambiarProceso(e.target.value)
+          }
           style={input}
           disabled={!ordenId}
         >
@@ -459,49 +651,88 @@ export default function AsignacionesPage() {
               : "Selecciona proceso"}
           </option>
 
-          {procesos.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.orden}. {p.nombre}
+          {procesos.map((proceso) => (
+            <option
+              key={proceso.id}
+              value={proceso.id}
+            >
+              {proceso.orden}. {proceso.nombre}
             </option>
           ))}
         </select>
 
-        <label style={etiqueta}>Trabajador</label>
+        <label style={etiqueta}>
+          Trabajador
+        </label>
 
         <select
           value={empleadoId}
-          onChange={(e) => setEmpleadoId(e.target.value)}
+          onChange={(e) =>
+            setEmpleadoId(e.target.value)
+          }
           style={input}
         >
-          <option value="">Selecciona trabajador</option>
+          <option value="">
+            Selecciona trabajador
+          </option>
 
-          {empleados.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.alias || e.nombre} - {e.puesto}
+          {empleados.map((empleado) => (
+            <option
+              key={empleado.id}
+              value={empleado.id}
+            >
+              {empleado.alias || empleado.nombre} -{" "}
+              {empleado.puesto}
             </option>
           ))}
         </select>
 
-        {tipoPago === "hora" && empleadoSeleccionado && (
-          <div style={tarifaCard}>
-            <div>
-              <small>Trabajador</small>
-              <strong>
-                {empleadoSeleccionado.alias ||
-                  empleadoSeleccionado.nombre}
-              </strong>
-            </div>
+        {tipoPago === "hora" &&
+          empleadoSeleccionado && (
+            <div style={tarifaCard}>
+              <div>
+                <small>Trabajador</small>
 
-            <div>
-              <small>Pago registrado por hora</small>
-              <strong>${tarifaEmpleado.toFixed(2)}</strong>
+                <strong>
+                  {empleadoSeleccionado.alias ||
+                    empleadoSeleccionado.nombre}
+                </strong>
+              </div>
+
+              <div>
+                <small>
+                  Pago registrado por hora
+                </small>
+
+                <strong>
+                  ${tarifaEmpleado.toFixed(2)}
+                </strong>
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
         {tipoPago === "pieza" ? (
           <>
             <h3>Bultos disponibles</h3>
+
+            {!procesoId && (
+              <div style={avisoProceso}>
+                Selecciona un proceso para conocer qué
+                bultos están disponibles.
+              </div>
+            )}
+
+            {procesoId && (
+              <div style={avisoBloqueo}>
+                Los bultos se bloquean únicamente para el
+                proceso seleccionado:{" "}
+                <strong>
+                  {procesoSeleccionado?.nombre}
+                </strong>
+                . El mismo bulto puede asignarse a otros
+                procesos.
+              </div>
+            )}
 
             <div
               style={{
@@ -515,6 +746,7 @@ export default function AsignacionesPage() {
                 type="button"
                 onClick={seleccionarTodo}
                 style={botonAzul}
+                disabled={!procesoId}
               >
                 Todo el corte
               </button>
@@ -531,7 +763,9 @@ export default function AsignacionesPage() {
                 <button
                   key={talla}
                   type="button"
-                  onClick={() => seleccionarTalla(talla)}
+                  onClick={() =>
+                    seleccionarTalla(talla)
+                  }
                   style={botonGris}
                 >
                   Todo {talla}
@@ -541,7 +775,9 @@ export default function AsignacionesPage() {
 
             <p>
               Seleccionados:{" "}
-              <strong>{seleccionados.length}</strong>
+              <strong>
+                {seleccionados.length}
+              </strong>
             </p>
 
             <div
@@ -551,41 +787,84 @@ export default function AsignacionesPage() {
                 gap: 10,
               }}
             >
-              {bultos.map((b) => {
-                const asignado = bultoEstaAsignado(b.id);
-                const activo = seleccionados.includes(b.id);
+              {bultos.map((bulto) => {
+                const asignacion =
+                  obtenerAsignacionDelProceso(
+                    bulto.id
+                  );
+
+                const asignado = Boolean(asignacion);
+
+                const activo =
+                  seleccionados.includes(bulto.id);
 
                 return (
                   <button
-                    key={b.id}
-                    disabled={asignado}
-                    onClick={() => cambiarBulto(b.id)}
+                    key={bulto.id}
+                    type="button"
+                    disabled={
+                      asignado || !procesoId
+                    }
+                    onClick={() =>
+                      cambiarBulto(bulto.id)
+                    }
                     style={{
                       padding: 14,
                       borderRadius: 10,
-                      border: "none",
-                      cursor: asignado
-                        ? "not-allowed"
-                        : "pointer",
-                      background: asignado
-                        ? "#d1d5db"
+                      border: asignado
+                        ? "1px solid #9ca3af"
                         : activo
-                        ? "#16a34a"
-                        : "#f3f4f6",
-                      color: activo ? "white" : "black",
+                          ? "1px solid #15803d"
+                          : "1px solid #e5e7eb",
+
+                      cursor:
+                        asignado || !procesoId
+                          ? "not-allowed"
+                          : "pointer",
+
+                      background: asignado
+                        ? asignacion.estado ===
+                          "Terminado"
+                          ? "#dcfce7"
+                          : "#d1d5db"
+                        : activo
+                          ? "#16a34a"
+                          : "#f3f4f6",
+
+                      color: activo
+                        ? "white"
+                        : "black",
+
                       fontWeight: "bold",
-                      minWidth: 90,
+                      minWidth: 105,
+                      opacity:
+                        !procesoId ? 0.6 : 1,
                     }}
                   >
                     {activo ? "✔ " : ""}
-                    {b.nombre_bulto}
+                    {bulto.nombre_bulto}
+
                     <br />
-                    {b.cantidad} pzs
+
+                    {bulto.cantidad} pzs
 
                     {asignado && (
                       <>
                         <br />
-                        🔒
+
+                        {asignacion.estado ===
+                        "Terminado"
+                          ? "✅ Terminado"
+                          : "🔒 Asignado"}
+
+                        <br />
+
+                        <small>
+                          {asignacion.empleados
+                            ?.alias ||
+                            asignacion.empleados
+                              ?.nombre}
+                        </small>
                       </>
                     )}
                   </button>
@@ -594,12 +873,22 @@ export default function AsignacionesPage() {
             </div>
 
             <button
+              type="button"
               onClick={asignarBultos}
               style={{
                 ...boton,
-                opacity: guardando ? 0.7 : 1,
+                opacity:
+                  guardando ||
+                  !procesoId ||
+                  seleccionados.length === 0
+                    ? 0.7
+                    : 1,
               }}
-              disabled={guardando}
+              disabled={
+                guardando ||
+                !procesoId ||
+                seleccionados.length === 0
+              }
             >
               {guardando
                 ? "Guardando..."
@@ -615,7 +904,9 @@ export default function AsignacionesPage() {
             <textarea
               value={descripcionTiempo}
               onChange={(e) =>
-                setDescripcionTiempo(e.target.value)
+                setDescripcionTiempo(
+                  e.target.value
+                )
               }
               placeholder="Ejemplo: deshebrar, revisar prendas, apoyar en producción..."
               style={{
@@ -625,6 +916,7 @@ export default function AsignacionesPage() {
             />
 
             <button
+              type="button"
               onClick={iniciarTrabajoTiempo}
               style={{
                 ...botonHora,
@@ -644,25 +936,40 @@ export default function AsignacionesPage() {
         <section style={card}>
           <h2>Trabajo asignado actual</h2>
 
-          {asignados.length === 0 && (
-            <p>No hay bultos asignados en esta orden.</p>
+          {asignadosActivos.length === 0 && (
+            <p>
+              No hay procesos asignados actualmente en
+              esta orden.
+            </p>
           )}
 
-          {asignados.map((a) => (
-            <div key={a.id} style={fila}>
-              <strong>
-                {a.empleados?.alias || a.empleados?.nombre}
-              </strong>{" "}
-              tiene{" "}
-              <strong>
-                {a.orden_bultos_v2?.nombre_bulto}
-              </strong>{" "}
-              en proceso{" "}
-              <strong>
-                {a.modelo_procesos?.nombre}
-              </strong>
-            </div>
-          ))}
+          {asignadosActivos.map(
+            (asignacion) => (
+              <div
+                key={asignacion.id}
+                style={fila}
+              >
+                <strong>
+                  {asignacion.empleados?.alias ||
+                    asignacion.empleados?.nombre}
+                </strong>{" "}
+                tiene{" "}
+                <strong>
+                  {
+                    asignacion.orden_bultos_v2
+                      ?.nombre_bulto
+                  }
+                </strong>{" "}
+                en el proceso{" "}
+                <strong>
+                  {
+                    asignacion.modelo_procesos
+                      ?.nombre
+                  }
+                </strong>
+              </div>
+            )
+          )}
         </section>
       )}
 
@@ -670,11 +977,17 @@ export default function AsignacionesPage() {
         <h2>⏱ Trabajos por hora activos</h2>
 
         {trabajosTiempo.length === 0 && (
-          <p>No hay trabajadores con pago por hora activo.</p>
+          <p>
+            No hay trabajadores con pago por hora
+            activo.
+          </p>
         )}
 
         {trabajosTiempo.map((trabajo) => (
-          <div key={trabajo.id} style={trabajoTiempoCard}>
+          <div
+            key={trabajo.id}
+            style={trabajoTiempoCard}
+          >
             <div>
               <strong style={{ fontSize: 18 }}>
                 {trabajo.empleados?.alias ||
@@ -692,31 +1005,49 @@ export default function AsignacionesPage() {
               )}
 
               {trabajo.modelo_procesos?.nombre && (
-                <small style={{ display: "block" }}>
+                <small
+                  style={{ display: "block" }}
+                >
                   Proceso:{" "}
-                  {trabajo.modelo_procesos.nombre}
+                  {
+                    trabajo.modelo_procesos
+                      .nombre
+                  }
                 </small>
               )}
             </div>
 
             <div style={{ textAlign: "right" }}>
-              <strong style={{ color: "#16a34a" }}>
+              <strong
+                style={{ color: "#16a34a" }}
+              >
                 🟢 Trabajando
               </strong>
 
-              <small style={{ display: "block", marginTop: 6 }}>
+              <small
+                style={{
+                  display: "block",
+                  marginTop: 6,
+                }}
+              >
                 Inicio:{" "}
-                {formatearFecha(trabajo.fecha_inicio)}
+                {formatearFecha(
+                  trabajo.fecha_inicio
+                )}
               </small>
 
-              <small style={{ display: "block" }}>
+              <small
+                style={{ display: "block" }}
+              >
                 Tiempo aproximado:{" "}
                 {calcularTiempoTranscurrido(
                   trabajo.fecha_inicio
                 )}
               </small>
 
-              <small style={{ display: "block" }}>
+              <small
+                style={{ display: "block" }}
+              >
                 Tarifa: $
                 {Number(
                   trabajo.tarifa_hora || 0
@@ -772,11 +1103,28 @@ const botonTipo = {
 
 const tarifaCard = {
   display: "grid",
-  gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(160px, 1fr))",
   gap: 12,
   background: "#eff6ff",
   border: "1px solid #bfdbfe",
   padding: 15,
+  borderRadius: 10,
+  marginBottom: 15,
+};
+
+const avisoProceso = {
+  background: "#fef3c7",
+  color: "#92400e",
+  padding: 12,
+  borderRadius: 10,
+  marginBottom: 15,
+};
+
+const avisoBloqueo = {
+  background: "#dbeafe",
+  color: "#1e3a8a",
+  padding: 12,
   borderRadius: 10,
   marginBottom: 15,
 };
@@ -839,7 +1187,8 @@ const fila = {
 
 const trabajoTiempoCard = {
   display: "grid",
-  gridTemplateColumns: "minmax(0, 1fr) auto",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(230px, 1fr))",
   gap: 20,
   padding: 15,
   marginBottom: 10,
