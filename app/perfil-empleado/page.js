@@ -19,6 +19,20 @@ export default function PerfilEmpleadoPage() {
   const [cargando, setCargando] = useState(false);
   const [detalleAbierto, setDetalleAbierto] = useState("hoy");
 
+  // NUEVO: formulario para registrar trabajo por tiempo manualmente
+  const [mostrarFormularioTiempo, setMostrarFormularioTiempo] =
+    useState(false);
+
+  const [fechaManual, setFechaManual] = useState(
+    obtenerFechaLocalActual()
+  );
+
+  const [horaInicioManual, setHoraInicioManual] = useState("");
+  const [horaFinManual, setHoraFinManual] = useState("");
+  const [descripcionManual, setDescripcionManual] = useState("");
+  const [tarifaManual, setTarifaManual] = useState("");
+  const [guardandoTiempo, setGuardandoTiempo] = useState(false);
+
   useEffect(() => {
     cargarEmpleados();
     cargarSemanaAbierta();
@@ -65,6 +79,9 @@ export default function PerfilEmpleadoPage() {
     setTrabajosTiempoActivos([]);
     setPrestamos([]);
     setHistorialSemanas([]);
+
+    setMostrarFormularioTiempo(false);
+    limpiarFormularioTiempo();
 
     if (!id) return;
 
@@ -207,21 +224,32 @@ export default function PerfilEmpleadoPage() {
         respuestaHistorial,
       ];
 
-      const respuestaConError = respuestas.find((respuesta) => respuesta.error);
+      const respuestaConError = respuestas.find(
+        (respuesta) => respuesta.error
+      );
 
       if (respuestaConError?.error) {
         throw respuestaConError.error;
       }
 
       setEmpleado(respuestaEmpleado.data);
+
       setAsignacionesTerminadas(
         respuestaAsignacionesTerminadas.data || []
       );
+
       setAsignacionesPendientes(
         respuestaAsignacionesPendientes.data || []
       );
-      setTrabajosTiempo(respuestaTiempoTerminado.data || []);
-      setTrabajosTiempoActivos(respuestaTiempoActivo.data || []);
+
+      setTrabajosTiempo(
+        respuestaTiempoTerminado.data || []
+      );
+
+      setTrabajosTiempoActivos(
+        respuestaTiempoActivo.data || []
+      );
+
       setPrestamos(respuestaPrestamos.data || []);
       setHistorialSemanas(respuestaHistorial.data || []);
     } catch (error) {
@@ -229,6 +257,14 @@ export default function PerfilEmpleadoPage() {
     } finally {
       setCargando(false);
     }
+  }
+
+  function limpiarFormularioTiempo() {
+    setFechaManual(obtenerFechaLocalActual());
+    setHoraInicioManual("");
+    setHoraFinManual("");
+    setDescripcionManual("");
+    setTarifaManual("");
   }
 
   function calcularPagoPaso(asignacion) {
@@ -269,13 +305,184 @@ export default function PerfilEmpleadoPage() {
     return registro >= inicio && registro <= fin;
   }
 
-  const resumen = useMemo(() => {
-    const pasosSemana = asignacionesTerminadas.filter((registro) =>
-      estaEnSemanaActual(registro.fecha_terminado)
+  const calculoTiempoManual = useMemo(() => {
+    if (
+      !fechaManual ||
+      !horaInicioManual ||
+      !horaFinManual
+    ) {
+      return {
+        valido: false,
+        minutos: 0,
+        total: 0,
+        inicio: null,
+        fin: null,
+      };
+    }
+
+    const inicio = crearFechaLocal(
+      fechaManual,
+      horaInicioManual
     );
 
-    const horasSemana = trabajosTiempo.filter((registro) =>
-      estaEnSemanaActual(registro.fecha_fin)
+    const fin = crearFechaLocal(
+      fechaManual,
+      horaFinManual
+    );
+
+    if (
+      Number.isNaN(inicio.getTime()) ||
+      Number.isNaN(fin.getTime()) ||
+      fin <= inicio
+    ) {
+      return {
+        valido: false,
+        minutos: 0,
+        total: 0,
+        inicio,
+        fin,
+      };
+    }
+
+    const minutos = Math.round(
+      (fin.getTime() - inicio.getTime()) / 60000
+    );
+
+    const tarifa = Number(tarifaManual || 0);
+
+    const total =
+      tarifa > 0
+        ? Number(((minutos / 60) * tarifa).toFixed(2))
+        : 0;
+
+    return {
+      valido: true,
+      minutos,
+      total,
+      inicio,
+      fin,
+    };
+  }, [
+    fechaManual,
+    horaInicioManual,
+    horaFinManual,
+    tarifaManual,
+  ]);
+
+  async function registrarTrabajoTiempoManual(e) {
+    e.preventDefault();
+
+    if (!empleadoId) {
+      alert("Selecciona un trabajador.");
+      return;
+    }
+
+    if (!fechaManual) {
+      alert("Selecciona la fecha.");
+      return;
+    }
+
+    if (!horaInicioManual || !horaFinManual) {
+      alert("Escribe la hora de inicio y la hora de término.");
+      return;
+    }
+
+    if (!descripcionManual.trim()) {
+      alert("Escribe una descripción del trabajo realizado.");
+      return;
+    }
+
+    const tarifa = Number(tarifaManual);
+
+    if (!Number.isFinite(tarifa) || tarifa <= 0) {
+      alert("Escribe una tarifa por hora válida.");
+      return;
+    }
+
+    if (!calculoTiempoManual.valido) {
+      alert(
+        "La hora de término debe ser posterior a la hora de inicio."
+      );
+      return;
+    }
+
+    if (calculoTiempoManual.fin > new Date()) {
+      alert(
+        "La hora de término no puede estar en el futuro."
+      );
+      return;
+    }
+
+    const confirmar = window.confirm(
+      `Se registrará ${formatearDuracion(
+        calculoTiempoManual.minutos
+      )} de trabajo por ${formatearDinero(
+        calculoTiempoManual.total
+      )} para ${empleado.alias || empleado.nombre}. ¿Continuar?`
+    );
+
+    if (!confirmar) return;
+
+    setGuardandoTiempo(true);
+
+    try {
+      const { error } = await supabase
+        .from("trabajos_tiempo")
+        .insert({
+          empleado_id: Number(empleadoId),
+          orden_id: null,
+          proceso_id: null,
+          descripcion: descripcionManual.trim(),
+          tarifa_hora: tarifa,
+          fecha_inicio:
+            calculoTiempoManual.inicio.toISOString(),
+          fecha_fin:
+            calculoTiempoManual.fin.toISOString(),
+          minutos_trabajados:
+            calculoTiempoManual.minutos,
+          total_pago:
+            calculoTiempoManual.total,
+          estado: "Terminado",
+          semana_id: null,
+        });
+
+      if (error) {
+        throw error;
+      }
+
+      alert(
+        `Trabajo registrado correctamente.\n\nTiempo: ${formatearDuracion(
+          calculoTiempoManual.minutos
+        )}\nPago: ${formatearDinero(
+          calculoTiempoManual.total
+        )}`
+      );
+
+      limpiarFormularioTiempo();
+      setMostrarFormularioTiempo(false);
+
+      await cargarPerfil(empleadoId);
+    } catch (error) {
+      console.error(error);
+
+      alert(
+        error.message ||
+          "No se pudo registrar el trabajo por tiempo."
+      );
+    } finally {
+      setGuardandoTiempo(false);
+    }
+  }
+
+  const resumen = useMemo(() => {
+    const pasosSemana = asignacionesTerminadas.filter(
+      (registro) =>
+        estaEnSemanaActual(registro.fecha_terminado)
+    );
+
+    const horasSemana = trabajosTiempo.filter(
+      (registro) =>
+        estaEnSemanaActual(registro.fecha_fin)
     );
 
     const pasosHoy = pasosSemana.filter((registro) =>
@@ -287,31 +494,37 @@ export default function PerfilEmpleadoPage() {
     );
 
     const pagoPasosSemana = pasosSemana.reduce(
-      (total, registro) => total + calcularPagoPaso(registro),
+      (total, registro) =>
+        total + calcularPagoPaso(registro),
       0
     );
 
     const pagoHorasSemana = horasSemana.reduce(
-      (total, registro) => total + Number(registro.total_pago || 0),
+      (total, registro) =>
+        total + Number(registro.total_pago || 0),
       0
     );
 
     const pagoPasosHoy = pasosHoy.reduce(
-      (total, registro) => total + calcularPagoPaso(registro),
+      (total, registro) =>
+        total + calcularPagoPaso(registro),
       0
     );
 
     const pagoHorasHoy = horasHoy.reduce(
-      (total, registro) => total + Number(registro.total_pago || 0),
+      (total, registro) =>
+        total + Number(registro.total_pago || 0),
       0
     );
 
-    const prestamosSemana = prestamos.filter((prestamo) =>
-      estaEnSemanaActual(prestamo.fecha)
+    const prestamosSemana = prestamos.filter(
+      (prestamo) =>
+        estaEnSemanaActual(prestamo.fecha)
     );
 
     const totalPrestamosSemana = prestamosSemana.reduce(
-      (total, prestamo) => total + Number(prestamo.monto || 0),
+      (total, prestamo) =>
+        total + Number(prestamo.monto || 0),
       0
     );
 
@@ -325,14 +538,18 @@ export default function PerfilEmpleadoPage() {
       pagoPasosHoy,
       pagoHorasHoy,
       totalHoy: pagoPasosHoy + pagoHorasHoy,
-      totalBrutoSemana: pagoPasosSemana + pagoHorasSemana,
+      totalBrutoSemana:
+        pagoPasosSemana + pagoHorasSemana,
       totalPrestamosSemana,
       netoEstimado:
-        pagoPasosSemana + pagoHorasSemana - totalPrestamosSemana,
+        pagoPasosSemana +
+        pagoHorasSemana -
+        totalPrestamosSemana,
       bultosTerminadosSemana: pasosSemana.length,
       minutosSemana: horasSemana.reduce(
         (total, registro) =>
-          total + Number(registro.minutos_trabajados || 0),
+          total +
+          Number(registro.minutos_trabajados || 0),
         0
       ),
     };
@@ -349,7 +566,13 @@ export default function PerfilEmpleadoPage() {
     function agregar(fecha, pago, tipo) {
       if (!fecha) return;
 
-      const clave = new Date(fecha).toISOString().slice(0, 10);
+      const fechaObj = new Date(fecha);
+
+      const clave = [
+        fechaObj.getFullYear(),
+        String(fechaObj.getMonth() + 1).padStart(2, "0"),
+        String(fechaObj.getDate()).padStart(2, "0"),
+      ].join("-");
 
       if (!dias[clave]) {
         dias[clave] = {
@@ -381,7 +604,8 @@ export default function PerfilEmpleadoPage() {
     });
 
     return Object.values(dias).sort(
-      (a, b) => new Date(b.fecha) - new Date(a.fecha)
+      (a, b) =>
+        new Date(b.fecha) - new Date(a.fecha)
     );
   }, [resumen]);
 
@@ -416,7 +640,9 @@ export default function PerfilEmpleadoPage() {
     const horas = Math.floor(total / 60);
     const restantes = total % 60;
 
-    if (horas === 0) return `${restantes} min`;
+    if (horas === 0) {
+      return `${restantes} min`;
+    }
 
     return `${horas} h ${restantes} min`;
   }
@@ -426,17 +652,26 @@ export default function PerfilEmpleadoPage() {
       <h1>👤 Perfil del empleado</h1>
 
       <section style={card}>
-        <label style={etiqueta}>Seleccionar empleado</label>
+        <label style={etiqueta}>
+          Seleccionar empleado
+        </label>
 
         <select
           value={empleadoId}
-          onChange={(e) => cargarPerfil(e.target.value)}
+          onChange={(e) =>
+            cargarPerfil(e.target.value)
+          }
           style={input}
         >
-          <option value="">Selecciona empleado</option>
+          <option value="">
+            Selecciona empleado
+          </option>
 
           {empleados.map((registro) => (
-            <option key={registro.id} value={registro.id}>
+            <option
+              key={registro.id}
+              value={registro.id}
+            >
               {registro.alias || registro.nombre}
             </option>
           ))}
@@ -451,7 +686,8 @@ export default function PerfilEmpleadoPage() {
             <div style={encabezadoPerfil}>
               <div>
                 <h2 style={{ margin: 0 }}>
-                  {empleado.alias || empleado.nombre}
+                  {empleado.alias ||
+                    empleado.nombre}
                 </h2>
 
                 {empleado.alias && (
@@ -460,31 +696,257 @@ export default function PerfilEmpleadoPage() {
               </div>
 
               <div style={estadoActivo}>
-                {empleado.activo ? "🟢 Activo" : "🔴 Inactivo"}
+                {empleado.activo
+                  ? "🟢 Activo"
+                  : "🔴 Inactivo"}
               </div>
             </div>
 
             <div style={datosEmpleado}>
               <p>
                 <strong>Puesto:</strong>{" "}
-                {empleado.puesto || "Sin registrar"}
+                {empleado.puesto ||
+                  "Sin registrar"}
               </p>
 
               <p>
                 <strong>Teléfono:</strong>{" "}
-                {empleado.telefono || "Sin registrar"}
+                {empleado.telefono ||
+                  "Sin registrar"}
               </p>
 
               <p>
                 <strong>Fecha de ingreso:</strong>{" "}
-                {empleado.fecha_ingreso || "Sin registrar"}
+                {empleado.fecha_ingreso ||
+                  "Sin registrar"}
               </p>
 
               <p>
                 <strong>Cumpleaños:</strong>{" "}
-                {empleado.cumpleanos || "Sin registrar"}
+                {empleado.cumpleanos ||
+                  "Sin registrar"}
               </p>
             </div>
+          </section>
+
+          {/* NUEVO: REGISTRO MANUAL POR TIEMPO */}
+          <section style={card}>
+            <div style={encabezadoAccion}>
+              <div>
+                <h2 style={{ margin: 0 }}>
+                  ⏱ Pago por tiempo
+                </h2>
+
+                <p
+                  style={{
+                    marginBottom: 0,
+                    color: "#6b7280",
+                  }}
+                >
+                  Registra horas trabajadas aunque no hayas
+                  iniciado el cronómetro en ese momento.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() =>
+                  setMostrarFormularioTiempo(
+                    !mostrarFormularioTiempo
+                  )
+                }
+                style={botonAgregarTiempo}
+              >
+                {mostrarFormularioTiempo
+                  ? "✕ Cancelar"
+                  : "➕ Registrar trabajo por tiempo"}
+              </button>
+            </div>
+
+            {mostrarFormularioTiempo && (
+              <form
+                onSubmit={
+                  registrarTrabajoTiempoManual
+                }
+                style={formularioTiempo}
+              >
+                <div style={campoFormulario}>
+                  <label style={etiqueta}>
+                    Fecha
+                  </label>
+
+                  <input
+                    type="date"
+                    value={fechaManual}
+                    max={obtenerFechaLocalActual()}
+                    onChange={(e) =>
+                      setFechaManual(e.target.value)
+                    }
+                    style={input}
+                    required
+                  />
+                </div>
+
+                <div style={campoFormulario}>
+                  <label style={etiqueta}>
+                    Hora de inicio
+                  </label>
+
+                  <input
+                    type="time"
+                    value={horaInicioManual}
+                    onChange={(e) =>
+                      setHoraInicioManual(
+                        e.target.value
+                      )
+                    }
+                    style={input}
+                    required
+                  />
+                </div>
+
+                <div style={campoFormulario}>
+                  <label style={etiqueta}>
+                    Hora de término
+                  </label>
+
+                  <input
+                    type="time"
+                    value={horaFinManual}
+                    onChange={(e) =>
+                      setHoraFinManual(
+                        e.target.value
+                      )
+                    }
+                    style={input}
+                    required
+                  />
+                </div>
+
+                <div style={campoFormulario}>
+                  <label style={etiqueta}>
+                    Tarifa por hora
+                  </label>
+
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    placeholder="Ej. 40"
+                    value={tarifaManual}
+                    onChange={(e) =>
+                      setTarifaManual(
+                        e.target.value
+                      )
+                    }
+                    style={input}
+                    required
+                  />
+                </div>
+
+                <div style={campoDescripcion}>
+                  <label style={etiqueta}>
+                    Descripción del trabajo
+                  </label>
+
+                  <input
+                    type="text"
+                    placeholder="Ej. Arreglar prendas, revisar piezas, apoyar en terminado..."
+                    value={descripcionManual}
+                    onChange={(e) =>
+                      setDescripcionManual(
+                        e.target.value
+                      )
+                    }
+                    style={input}
+                    required
+                  />
+                </div>
+
+                <div style={vistaPreviaTiempo}>
+                  <div>
+                    <small>
+                      Tiempo trabajado
+                    </small>
+
+                    <strong>
+                      {calculoTiempoManual.valido
+                        ? formatearDuracion(
+                            calculoTiempoManual.minutos
+                          )
+                        : "—"}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <small>
+                      Tarifa
+                    </small>
+
+                    <strong>
+                      {tarifaManual
+                        ? `${formatearDinero(
+                            tarifaManual
+                          )}/h`
+                        : "—"}
+                    </strong>
+                  </div>
+
+                  <div>
+                    <small>
+                      Pago calculado
+                    </small>
+
+                    <strong
+                      style={{
+                        color: "#166534",
+                        fontSize: 22,
+                      }}
+                    >
+                      {calculoTiempoManual.valido
+                        ? formatearDinero(
+                            calculoTiempoManual.total
+                          )
+                        : "$0.00"}
+                    </strong>
+                  </div>
+                </div>
+
+                {horaInicioManual &&
+                  horaFinManual &&
+                  !calculoTiempoManual.valido && (
+                    <div style={mensajeError}>
+                      La hora de término debe ser
+                      posterior a la hora de inicio.
+                    </div>
+                  )}
+
+                <button
+                  type="submit"
+                  disabled={
+                    guardandoTiempo ||
+                    !calculoTiempoManual.valido
+                  }
+                  style={{
+                    ...botonGuardarTiempo,
+                    opacity:
+                      guardandoTiempo ||
+                      !calculoTiempoManual.valido
+                        ? 0.6
+                        : 1,
+                    cursor:
+                      guardandoTiempo ||
+                      !calculoTiempoManual.valido
+                        ? "not-allowed"
+                        : "pointer",
+                  }}
+                >
+                  {guardandoTiempo
+                    ? "Guardando..."
+                    : "💾 Guardar trabajo por tiempo"}
+                </button>
+              </form>
+            )}
           </section>
 
           <h2>Resumen en tiempo real</h2>
@@ -492,21 +954,37 @@ export default function PerfilEmpleadoPage() {
           <section style={resumenGrid}>
             <div style={tarjetaResumen}>
               <small>Generado hoy</small>
-              <strong>{formatearDinero(resumen.totalHoy)}</strong>
+
+              <strong>
+                {formatearDinero(
+                  resumen.totalHoy
+                )}
+              </strong>
 
               <span>
-                Pasos: {formatearDinero(resumen.pagoPasosHoy)}
+                Pasos:{" "}
+                {formatearDinero(
+                  resumen.pagoPasosHoy
+                )}
               </span>
 
               <span>
-                Horas: {formatearDinero(resumen.pagoHorasHoy)}
+                Horas:{" "}
+                {formatearDinero(
+                  resumen.pagoHorasHoy
+                )}
               </span>
             </div>
 
             <div style={tarjetaResumen}>
-              <small>Pago por pasos esta semana</small>
+              <small>
+                Pago por pasos esta semana
+              </small>
+
               <strong>
-                {formatearDinero(resumen.pagoPasosSemana)}
+                {formatearDinero(
+                  resumen.pagoPasosSemana
+                )}
               </strong>
 
               <span>
@@ -516,34 +994,58 @@ export default function PerfilEmpleadoPage() {
             </div>
 
             <div style={tarjetaResumen}>
-              <small>Pago por hora esta semana</small>
+              <small>
+                Pago por hora esta semana
+              </small>
+
               <strong>
-                {formatearDinero(resumen.pagoHorasSemana)}
+                {formatearDinero(
+                  resumen.pagoHorasSemana
+                )}
               </strong>
 
               <span>
-                Tiempo: {formatearDuracion(resumen.minutosSemana)}
+                Tiempo:{" "}
+                {formatearDuracion(
+                  resumen.minutosSemana
+                )}
               </span>
             </div>
 
             <div style={tarjetaTotal}>
-              <small>Acumulado bruto semanal</small>
+              <small>
+                Acumulado bruto semanal
+              </small>
+
               <strong>
-                {formatearDinero(resumen.totalBrutoSemana)}
+                {formatearDinero(
+                  resumen.totalBrutoSemana
+                )}
               </strong>
             </div>
 
             <div style={tarjetaPrestamo}>
-              <small>Préstamos registrados esta semana</small>
+              <small>
+                Préstamos registrados esta semana
+              </small>
+
               <strong>
-                -{formatearDinero(resumen.totalPrestamosSemana)}
+                -
+                {formatearDinero(
+                  resumen.totalPrestamosSemana
+                )}
               </strong>
             </div>
 
             <div style={tarjetaNeto}>
-              <small>Neto estimado para el cierre</small>
+              <small>
+                Neto estimado para el cierre
+              </small>
+
               <strong>
-                {formatearDinero(resumen.netoEstimado)}
+                {formatearDinero(
+                  resumen.netoEstimado
+                )}
               </strong>
             </div>
           </section>
@@ -552,26 +1054,45 @@ export default function PerfilEmpleadoPage() {
             <h2>📅 Ganancia por día</h2>
 
             {resumenPorDia.length === 0 && (
-              <p>Todavía no hay trabajos terminados esta semana.</p>
+              <p>
+                Todavía no hay trabajos terminados
+                esta semana.
+              </p>
             )}
 
             {resumenPorDia.map((dia) => (
-              <div key={dia.fecha} style={filaDia}>
+              <div
+                key={dia.fecha}
+                style={filaDia}
+              >
                 <div>
-                  <strong>{formatearSoloFecha(dia.fecha)}</strong>
+                  <strong>
+                    {formatearSoloFecha(
+                      dia.fecha
+                    )}
+                  </strong>
                 </div>
 
                 <div style={totalesDia}>
                   <span>
-                    Pasos: {formatearDinero(dia.pasos)}
+                    Pasos:{" "}
+                    {formatearDinero(
+                      dia.pasos
+                    )}
                   </span>
 
                   <span>
-                    Horas: {formatearDinero(dia.horas)}
+                    Horas:{" "}
+                    {formatearDinero(
+                      dia.horas
+                    )}
                   </span>
 
                   <strong>
-                    Total: {formatearDinero(dia.total)}
+                    Total:{" "}
+                    {formatearDinero(
+                      dia.total
+                    )}
                   </strong>
                 </div>
               </div>
@@ -579,66 +1100,124 @@ export default function PerfilEmpleadoPage() {
           </section>
 
           <section style={card}>
-            <h2>Trabajo actual y pendiente</h2>
+            <h2>
+              Trabajo actual y pendiente
+            </h2>
 
             <div style={resumenGrid}>
               <div style={tarjetaResumen}>
-                <small>Bultos pendientes</small>
-                <strong>{asignacionesPendientes.length}</strong>
+                <small>
+                  Bultos pendientes
+                </small>
+
+                <strong>
+                  {
+                    asignacionesPendientes.length
+                  }
+                </strong>
               </div>
 
               <div style={tarjetaResumen}>
-                <small>Trabajos por hora activos</small>
-                <strong>{trabajosTiempoActivos.length}</strong>
+                <small>
+                  Trabajos por hora activos
+                </small>
+
+                <strong>
+                  {
+                    trabajosTiempoActivos.length
+                  }
+                </strong>
               </div>
             </div>
 
-            {asignacionesPendientes.map((registro) => (
-              <div key={registro.id} style={pendienteCard}>
-                <strong>
-                  {registro.orden_bultos_v2?.nombre_bulto}
-                </strong>
+            {asignacionesPendientes.map(
+              (registro) => (
+                <div
+                  key={registro.id}
+                  style={pendienteCard}
+                >
+                  <strong>
+                    {
+                      registro
+                        .orden_bultos_v2
+                        ?.nombre_bulto
+                    }
+                  </strong>
 
-                <span>
-                  {registro.modelo_procesos?.nombre}
-                </span>
+                  <span>
+                    {
+                      registro
+                        .modelo_procesos
+                        ?.nombre
+                    }
+                  </span>
 
-                <small>
-                  Orden: {registro.ordenes?.folio || "Sin orden"} ·
-                  Modelo:{" "}
-                  {registro.ordenes?.modelos?.codigo || "Sin modelo"}
-                </small>
+                  <small>
+                    Orden:{" "}
+                    {registro.ordenes
+                      ?.folio ||
+                      "Sin orden"}{" "}
+                    · Modelo:{" "}
+                    {registro.ordenes
+                      ?.modelos?.codigo ||
+                      "Sin modelo"}
+                  </small>
 
-                <small style={{ color: "#92400e" }}>
-                  Pendiente: todavía no se suma a la nómina
-                </small>
-              </div>
-            ))}
+                  <small
+                    style={{
+                      color: "#92400e",
+                    }}
+                  >
+                    Pendiente: todavía no se
+                    suma a la nómina
+                  </small>
+                </div>
+              )
+            )}
 
-            {trabajosTiempoActivos.map((registro) => (
-              <div key={registro.id} style={activoCard}>
-                <strong>⏱ {registro.descripcion}</strong>
+            {trabajosTiempoActivos.map(
+              (registro) => (
+                <div
+                  key={registro.id}
+                  style={activoCard}
+                >
+                  <strong>
+                    ⏱ {registro.descripcion}
+                  </strong>
 
-                <small>
-                  Inició: {formatearFecha(registro.fecha_inicio)}
-                </small>
+                  <small>
+                    Inició:{" "}
+                    {formatearFecha(
+                      registro.fecha_inicio
+                    )}
+                  </small>
 
-                <small>
-                  Tarifa: {formatearDinero(registro.tarifa_hora)} por
-                  hora
-                </small>
+                  <small>
+                    Tarifa:{" "}
+                    {formatearDinero(
+                      registro.tarifa_hora
+                    )}{" "}
+                    por hora
+                  </small>
 
-                <small style={{ color: "#166534" }}>
-                  Trabajando actualmente
-                </small>
-              </div>
-            ))}
+                  <small
+                    style={{
+                      color: "#166534",
+                    }}
+                  >
+                    Trabajando actualmente
+                  </small>
+                </div>
+              )
+            )}
           </section>
 
           <section style={card}>
             <div style={pestanas}>
               <button
-                onClick={() => setDetalleAbierto("hoy")}
+                onClick={() =>
+                  setDetalleAbierto("hoy")
+                }
                 style={{
                   ...botonPestana,
                   ...(detalleAbierto === "hoy"
@@ -650,10 +1229,13 @@ export default function PerfilEmpleadoPage() {
               </button>
 
               <button
-                onClick={() => setDetalleAbierto("semana")}
+                onClick={() =>
+                  setDetalleAbierto("semana")
+                }
                 style={{
                   ...botonPestana,
-                  ...(detalleAbierto === "semana"
+                  ...(detalleAbierto ===
+                  "semana"
                     ? botonPestanaActivo
                     : {}),
                 }}
@@ -662,10 +1244,15 @@ export default function PerfilEmpleadoPage() {
               </button>
 
               <button
-                onClick={() => setDetalleAbierto("historial")}
+                onClick={() =>
+                  setDetalleAbierto(
+                    "historial"
+                  )
+                }
                 style={{
                   ...botonPestana,
-                  ...(detalleAbierto === "historial"
+                  ...(detalleAbierto ===
+                  "historial"
                     ? botonPestanaActivo
                     : {}),
                 }}
@@ -676,110 +1263,195 @@ export default function PerfilEmpleadoPage() {
 
             {detalleAbierto === "hoy" && (
               <>
-                <h2>Trabajos terminados hoy</h2>
+                <h2>
+                  Trabajos terminados hoy
+                </h2>
 
-                {resumen.pasosHoy.map((registro) => (
-                  <DetallePaso
-                    key={`paso-${registro.id}`}
-                    registro={registro}
-                    calcularPagoPaso={calcularPagoPaso}
-                    formatearDinero={formatearDinero}
-                    formatearFecha={formatearFecha}
-                  />
-                ))}
-
-                {resumen.horasHoy.map((registro) => (
-                  <DetalleHora
-                    key={`hora-${registro.id}`}
-                    registro={registro}
-                    formatearDinero={formatearDinero}
-                    formatearFecha={formatearFecha}
-                    formatearDuracion={formatearDuracion}
-                  />
-                ))}
-
-                {resumen.pasosHoy.length === 0 &&
-                  resumen.horasHoy.length === 0 && (
-                    <p>No hay trabajos terminados hoy.</p>
-                  )}
-              </>
-            )}
-
-            {detalleAbierto === "semana" && (
-              <>
-                <h2>Trabajos terminados esta semana</h2>
-
-                {resumen.pasosSemana.map((registro) => (
-                  <DetallePaso
-                    key={`paso-${registro.id}`}
-                    registro={registro}
-                    calcularPagoPaso={calcularPagoPaso}
-                    formatearDinero={formatearDinero}
-                    formatearFecha={formatearFecha}
-                  />
-                ))}
-
-                {resumen.horasSemana.map((registro) => (
-                  <DetalleHora
-                    key={`hora-${registro.id}`}
-                    registro={registro}
-                    formatearDinero={formatearDinero}
-                    formatearFecha={formatearFecha}
-                    formatearDuracion={formatearDuracion}
-                  />
-                ))}
-
-                {resumen.pasosSemana.length === 0 &&
-                  resumen.horasSemana.length === 0 && (
-                    <p>No hay trabajos terminados esta semana.</p>
-                  )}
-              </>
-            )}
-
-            {detalleAbierto === "historial" && (
-              <>
-                <h2>Historial de nóminas cerradas</h2>
-
-                {historialSemanas.length === 0 && (
-                  <p>Todavía no hay semanas cerradas.</p>
+                {resumen.pasosHoy.map(
+                  (registro) => (
+                    <DetallePaso
+                      key={`paso-${registro.id}`}
+                      registro={registro}
+                      calcularPagoPaso={
+                        calcularPagoPaso
+                      }
+                      formatearDinero={
+                        formatearDinero
+                      }
+                      formatearFecha={
+                        formatearFecha
+                      }
+                    />
+                  )
                 )}
 
-                {historialSemanas.map((registro) => (
-                  <div key={registro.id} style={historialCard}>
-                    <div>
-                      <strong>
-                        Semana del{" "}
-                        {formatearSoloFecha(
-                          registro.semanas_nomina?.fecha_inicio
-                        )}
-                      </strong>
+                {resumen.horasHoy.map(
+                  (registro) => (
+                    <DetalleHora
+                      key={`hora-${registro.id}`}
+                      registro={registro}
+                      formatearDinero={
+                        formatearDinero
+                      }
+                      formatearFecha={
+                        formatearFecha
+                      }
+                      formatearDuracion={
+                        formatearDuracion
+                      }
+                    />
+                  )
+                )}
 
-                      <small style={{ display: "block" }}>
-                        Cerrada:{" "}
-                        {formatearFecha(
-                          registro.semanas_nomina?.fecha_cierre
-                        )}
-                      </small>
+                {resumen.pasosHoy.length ===
+                  0 &&
+                  resumen.horasHoy.length ===
+                    0 && (
+                    <p>
+                      No hay trabajos terminados
+                      hoy.
+                    </p>
+                  )}
+              </>
+            )}
+
+            {detalleAbierto ===
+              "semana" && (
+              <>
+                <h2>
+                  Trabajos terminados esta
+                  semana
+                </h2>
+
+                {resumen.pasosSemana.map(
+                  (registro) => (
+                    <DetallePaso
+                      key={`paso-${registro.id}`}
+                      registro={registro}
+                      calcularPagoPaso={
+                        calcularPagoPaso
+                      }
+                      formatearDinero={
+                        formatearDinero
+                      }
+                      formatearFecha={
+                        formatearFecha
+                      }
+                    />
+                  )
+                )}
+
+                {resumen.horasSemana.map(
+                  (registro) => (
+                    <DetalleHora
+                      key={`hora-${registro.id}`}
+                      registro={registro}
+                      formatearDinero={
+                        formatearDinero
+                      }
+                      formatearFecha={
+                        formatearFecha
+                      }
+                      formatearDuracion={
+                        formatearDuracion
+                      }
+                    />
+                  )
+                )}
+
+                {resumen.pasosSemana.length ===
+                  0 &&
+                  resumen.horasSemana.length ===
+                    0 && (
+                    <p>
+                      No hay trabajos terminados
+                      esta semana.
+                    </p>
+                  )}
+              </>
+            )}
+
+            {detalleAbierto ===
+              "historial" && (
+              <>
+                <h2>
+                  Historial de nóminas cerradas
+                </h2>
+
+                {historialSemanas.length ===
+                  0 && (
+                  <p>
+                    Todavía no hay semanas
+                    cerradas.
+                  </p>
+                )}
+
+                {historialSemanas.map(
+                  (registro) => (
+                    <div
+                      key={registro.id}
+                      style={historialCard}
+                    >
+                      <div>
+                        <strong>
+                          Semana del{" "}
+                          {formatearSoloFecha(
+                            registro
+                              .semanas_nomina
+                              ?.fecha_inicio
+                          )}
+                        </strong>
+
+                        <small
+                          style={{
+                            display:
+                              "block",
+                          }}
+                        >
+                          Cerrada:{" "}
+                          {formatearFecha(
+                            registro
+                              .semanas_nomina
+                              ?.fecha_cierre
+                          )}
+                        </small>
+                      </div>
+
+                      <div
+                        style={{
+                          textAlign:
+                            "right",
+                        }}
+                      >
+                        <small>
+                          Pasos:{" "}
+                          {formatearDinero(
+                            registro.pago_pieza
+                          )}
+                        </small>
+
+                        <small
+                          style={{
+                            display:
+                              "block",
+                          }}
+                        >
+                          Horas:{" "}
+                          {formatearDinero(
+                            registro.pago_hora
+                          )}
+                        </small>
+
+                        <strong>
+                          Total:{" "}
+                          {formatearDinero(
+                            registro.total_pago
+                          )}
+                        </strong>
+                      </div>
                     </div>
-
-                    <div style={{ textAlign: "right" }}>
-                      <small>
-                        Pasos:{" "}
-                        {formatearDinero(registro.pago_pieza)}
-                      </small>
-
-                      <small style={{ display: "block" }}>
-                        Horas:{" "}
-                        {formatearDinero(registro.pago_hora)}
-                      </small>
-
-                      <strong>
-                        Total:{" "}
-                        {formatearDinero(registro.total_pago)}
-                      </strong>
-                    </div>
-                  </div>
-                ))}
+                  )
+                )}
               </>
             )}
           </section>
@@ -798,24 +1470,44 @@ function DetallePaso({
   return (
     <div style={detalleCard}>
       <div>
-        <strong>{registro.modelo_procesos?.nombre}</strong>
+        <strong>
+          {registro.modelo_procesos?.nombre}
+        </strong>
 
         <small style={{ display: "block" }}>
-          {registro.orden_bultos_v2?.nombre_bulto} ·{" "}
-          {registro.orden_bultos_v2?.cantidad} unidades procesadas
+          {
+            registro.orden_bultos_v2
+              ?.nombre_bulto
+          }{" "}
+          ·{" "}
+          {
+            registro.orden_bultos_v2
+              ?.cantidad
+          }{" "}
+          unidades procesadas
         </small>
 
         <small style={{ display: "block" }}>
-          Orden: {registro.ordenes?.folio || "Sin orden"} · Modelo:{" "}
-          {registro.ordenes?.modelos?.codigo || "Sin modelo"}
+          Orden:{" "}
+          {registro.ordenes?.folio ||
+            "Sin orden"}{" "}
+          · Modelo:{" "}
+          {registro.ordenes?.modelos
+            ?.codigo || "Sin modelo"}
         </small>
 
         <small style={{ display: "block" }}>
-          {formatearFecha(registro.fecha_terminado)}
+          {formatearFecha(
+            registro.fecha_terminado
+          )}
         </small>
       </div>
 
-      <strong>{formatearDinero(calcularPagoPaso(registro))}</strong>
+      <strong>
+        {formatearDinero(
+          calcularPagoPaso(registro)
+        )}
+      </strong>
     </div>
   );
 }
@@ -829,24 +1521,73 @@ function DetalleHora({
   return (
     <div style={detalleCard}>
       <div>
-        <strong>⏱ {registro.descripcion}</strong>
+        <strong>
+          ⏱ {registro.descripcion}
+        </strong>
 
         <small style={{ display: "block" }}>
-          {registro.modelo_procesos?.nombre || "Sin proceso específico"}
+          {registro.modelo_procesos?.nombre ||
+            "Sin proceso específico"}
         </small>
 
         <small style={{ display: "block" }}>
-          {formatearDuracion(registro.minutos_trabajados)} ·{" "}
-          {formatearDinero(registro.tarifa_hora)} por hora
+          {formatearDuracion(
+            registro.minutos_trabajados
+          )}{" "}
+          ·{" "}
+          {formatearDinero(
+            registro.tarifa_hora
+          )}{" "}
+          por hora
         </small>
 
         <small style={{ display: "block" }}>
-          {formatearFecha(registro.fecha_fin)}
+          {formatearFecha(
+            registro.fecha_fin
+          )}
         </small>
       </div>
 
-      <strong>{formatearDinero(registro.total_pago)}</strong>
+      <strong>
+        {formatearDinero(
+          registro.total_pago
+        )}
+      </strong>
     </div>
+  );
+}
+
+function obtenerFechaLocalActual() {
+  const ahora = new Date();
+
+  const anio = ahora.getFullYear();
+  const mes = String(
+    ahora.getMonth() + 1
+  ).padStart(2, "0");
+  const dia = String(
+    ahora.getDate()
+  ).padStart(2, "0");
+
+  return `${anio}-${mes}-${dia}`;
+}
+
+function crearFechaLocal(fecha, hora) {
+  const [anio, mes, dia] = fecha
+    .split("-")
+    .map(Number);
+
+  const [horas, minutos] = hora
+    .split(":")
+    .map(Number);
+
+  return new Date(
+    anio,
+    mes - 1,
+    dia,
+    horas,
+    minutos,
+    0,
+    0
   );
 }
 
@@ -855,7 +1596,8 @@ const card = {
   padding: 20,
   borderRadius: 12,
   marginBottom: 20,
-  boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+  boxShadow:
+    "0 2px 8px rgba(0,0,0,0.08)",
 };
 
 const input = {
@@ -889,14 +1631,16 @@ const estadoActivo = {
 
 const datosEmpleado = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(200px, 1fr))",
   gap: 10,
   marginTop: 15,
 };
 
 const resumenGrid = {
   display: "grid",
-  gridTemplateColumns: "repeat(auto-fit, minmax(190px, 1fr))",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(190px, 1fr))",
   gap: 15,
   marginBottom: 20,
 };
@@ -905,7 +1649,8 @@ const tarjetaResumen = {
   background: "white",
   padding: 18,
   borderRadius: 12,
-  boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
+  boxShadow:
+    "0 2px 8px rgba(0,0,0,0.08)",
   display: "grid",
   gap: 7,
 };
@@ -1003,4 +1748,74 @@ const historialCard = {
   marginBottom: 10,
   border: "1px solid #e5e7eb",
   borderRadius: 10,
+};
+
+// NUEVOS ESTILOS DEL FORMULARIO
+
+const encabezadoAccion = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 15,
+  flexWrap: "wrap",
+};
+
+const botonAgregarTiempo = {
+  padding: "11px 15px",
+  border: "none",
+  borderRadius: 8,
+  background: "#2563eb",
+  color: "white",
+  fontWeight: "bold",
+  cursor: "pointer",
+};
+
+const formularioTiempo = {
+  display: "grid",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(180px, 1fr))",
+  gap: 15,
+  marginTop: 20,
+  paddingTop: 20,
+  borderTop: "1px solid #e5e7eb",
+};
+
+const campoFormulario = {
+  minWidth: 0,
+};
+
+const campoDescripcion = {
+  gridColumn: "1 / -1",
+};
+
+const vistaPreviaTiempo = {
+  gridColumn: "1 / -1",
+  display: "grid",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(160px, 1fr))",
+  gap: 12,
+  padding: 16,
+  borderRadius: 10,
+  background: "#f0fdf4",
+  border: "1px solid #bbf7d0",
+};
+
+const mensajeError = {
+  gridColumn: "1 / -1",
+  padding: 12,
+  background: "#fee2e2",
+  color: "#991b1b",
+  borderRadius: 8,
+  fontWeight: "bold",
+};
+
+const botonGuardarTiempo = {
+  gridColumn: "1 / -1",
+  padding: 13,
+  border: "none",
+  borderRadius: 9,
+  background: "#166534",
+  color: "white",
+  fontWeight: "bold",
+  fontSize: 15,
 };
