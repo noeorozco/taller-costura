@@ -172,6 +172,7 @@ export default function InicioPage() {
       setEmpleados(respuestaEmpleados.data || []);
     } catch (error) {
       console.error(error);
+
       setErrorCarga(
         error.message || "No se pudo cargar el Centro de Inteligencia"
       );
@@ -306,14 +307,41 @@ export default function InicioPage() {
     empleados,
   ]);
 
+  /*
+   * RANKING COMPLETO
+   *
+   * Primero agregamos todos los empleados activos.
+   * Después sumamos lo generado por pasos y por tiempo.
+   *
+   * De esta manera también aparecen empleados que todavía
+   * llevan $0 generados durante la semana.
+   */
   const ranking = useMemo(() => {
     const mapa = new Map();
 
-    function obtenerEmpleado(registro) {
+    empleados.forEach((persona) => {
+      const id = Number(persona.id);
+
+      mapa.set(id, {
+        empleadoId: id,
+        nombre:
+          persona.alias ||
+          persona.nombre ||
+          `Empleado ${id}`,
+        pagoPasos: 0,
+        pagoHoras: 0,
+        total: 0,
+        bultos: 0,
+        trabajosHora: 0,
+      });
+    });
+
+    asignacionesTerminadas.forEach((registro) => {
       const id = Number(registro.empleado_id);
-      const persona = registro.empleados;
 
       if (!mapa.has(id)) {
+        const persona = registro.empleados;
+
         mapa.set(id, {
           empleadoId: id,
           nombre:
@@ -328,31 +356,54 @@ export default function InicioPage() {
         });
       }
 
-      return mapa.get(id);
-    }
-
-    asignacionesTerminadas.forEach((registro) => {
-      const empleado = obtenerEmpleado(registro);
+      const trabajador = mapa.get(id);
       const pago = calcularPagoPaso(registro);
 
-      empleado.pagoPasos += pago;
-      empleado.total += pago;
-      empleado.bultos += 1;
+      trabajador.pagoPasos += pago;
+      trabajador.total += pago;
+      trabajador.bultos += 1;
     });
 
     trabajosTerminados.forEach((registro) => {
-      const empleado = obtenerEmpleado(registro);
+      const id = Number(registro.empleado_id);
+
+      if (!mapa.has(id)) {
+        const persona = registro.empleados;
+
+        mapa.set(id, {
+          empleadoId: id,
+          nombre:
+            persona?.alias ||
+            persona?.nombre ||
+            `Empleado ${id}`,
+          pagoPasos: 0,
+          pagoHoras: 0,
+          total: 0,
+          bultos: 0,
+          trabajosHora: 0,
+        });
+      }
+
+      const trabajador = mapa.get(id);
       const pago = Number(registro.total_pago || 0);
 
-      empleado.pagoHoras += pago;
-      empleado.total += pago;
-      empleado.trabajosHora += 1;
+      trabajador.pagoHoras += pago;
+      trabajador.total += pago;
+      trabajador.trabajosHora += 1;
     });
 
-    return [...mapa.values()]
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 5);
-  }, [asignacionesTerminadas, trabajosTerminados]);
+    return [...mapa.values()].sort((a, b) => {
+      if (b.total !== a.total) {
+        return b.total - a.total;
+      }
+
+      return a.nombre.localeCompare(b.nombre, "es");
+    });
+  }, [
+    empleados,
+    asignacionesTerminadas,
+    trabajosTerminados,
+  ]);
 
   const procesosDestacados = useMemo(() => {
     const mapa = new Map();
@@ -376,6 +427,7 @@ export default function InicioPage() {
       proceso.unidadesProcesadas += Number(
         registro.orden_bultos_v2?.cantidad || 0
       );
+
       proceso.pagoGenerado += calcularPagoPaso(registro);
     });
 
@@ -443,7 +495,8 @@ export default function InicioPage() {
 
     const tiempo =
       trabajosActivos.some(
-        (trabajo) => minutosDesde(trabajo.fecha_inicio) >= 240
+        (trabajo) =>
+          minutosDesde(trabajo.fecha_inicio) >= 240
       )
         ? "rojo"
         : trabajosActivos.length > 0
@@ -514,7 +567,9 @@ export default function InicioPage() {
 
       {errorCarga && (
         <div style={alertaError}>
-          <strong>No se pudo cargar toda la información.</strong>
+          <strong>
+            No se pudo cargar toda la información.
+          </strong>
           <br />
           {errorCarga}
         </div>
@@ -611,38 +666,59 @@ export default function InicioPage() {
         </div>
 
         <div style={card}>
-          <h2>🏆 Productividad semanal</h2>
+          <h2>🏆 Ranking completo de trabajadores</h2>
 
           <p style={{ color: "#6b7280" }}>
-            Ranking por pago generado en pasos y trabajos por hora.
+            Todos los trabajadores ordenados por dinero generado
+            esta semana.
           </p>
 
           {ranking.length === 0 && (
-            <p>Todavía no hay trabajos terminados esta semana.</p>
+            <p>No hay trabajadores activos registrados.</p>
           )}
 
-          {ranking.map((empleado, index) => (
-            <div key={empleado.empleadoId} style={rankingFila}>
-              <div style={posicionRanking}>{index + 1}</div>
+          {ranking.map((trabajador, index) => (
+            <div
+              key={trabajador.empleadoId}
+              style={rankingFila}
+            >
+              <div
+                style={{
+                  ...posicionRanking,
+                  ...(index === 0
+                    ? posicionPrimero
+                    : index === 1
+                    ? posicionSegundo
+                    : index === 2
+                    ? posicionTercero
+                    : {}),
+                }}
+              >
+                {index + 1}
+              </div>
 
               <div style={{ flex: 1 }}>
-                <strong>{empleado.nombre}</strong>
+                <strong>{trabajador.nombre}</strong>
 
                 <small style={{ display: "block" }}>
-                  {empleado.bultos} bultos procesados ·{" "}
-                  {empleado.trabajosHora} trabajos por hora
+                  {trabajador.bultos} bultos procesados ·{" "}
+                  {trabajador.trabajosHora} trabajos por hora
                 </small>
               </div>
 
               <div style={{ textAlign: "right" }}>
-                <strong>{formatearDinero(empleado.total)}</strong>
+                <strong style={{ fontSize: 17 }}>
+                  {formatearDinero(trabajador.total)}
+                </strong>
 
                 <small style={{ display: "block" }}>
-                  Pasos: {formatearDinero(empleado.pagoPasos)}
+                  Pasos:{" "}
+                  {formatearDinero(trabajador.pagoPasos)}
                 </small>
 
                 <small style={{ display: "block" }}>
-                  Horas: {formatearDinero(empleado.pagoHoras)}
+                  Horas:{" "}
+                  {formatearDinero(trabajador.pagoHoras)}
                 </small>
               </div>
             </div>
@@ -655,11 +731,16 @@ export default function InicioPage() {
           <h2>🧵 Procesos con mayor pago generado</h2>
 
           {procesosDestacados.length === 0 && (
-            <p>Todavía no hay procesos terminados esta semana.</p>
+            <p>
+              Todavía no hay procesos terminados esta semana.
+            </p>
           )}
 
           {procesosDestacados.map((proceso, index) => (
-            <div key={proceso.proceso} style={procesoFila}>
+            <div
+              key={proceso.proceso}
+              style={procesoFila}
+            >
               <div>
                 <strong>
                   {index + 1}. {proceso.proceso}
@@ -667,8 +748,8 @@ export default function InicioPage() {
 
                 <small style={{ display: "block" }}>
                   {proceso.bultos} bultos ·{" "}
-                  {proceso.unidadesProcesadas} unidades procesadas
-                  dentro del paso
+                  {proceso.unidadesProcesadas} unidades
+                  procesadas dentro del paso
                 </small>
               </div>
 
@@ -687,10 +768,15 @@ export default function InicioPage() {
           )}
 
           {trabajosActivos.map((trabajo) => {
-            const minutos = minutosDesde(trabajo.fecha_inicio);
+            const minutos = minutosDesde(
+              trabajo.fecha_inicio
+            );
 
             return (
-              <div key={trabajo.id} style={trabajoActivoCard}>
+              <div
+                key={trabajo.id}
+                style={trabajoActivoCard}
+              >
                 <div>
                   <strong>
                     {trabajo.empleados?.alias ||
@@ -702,15 +788,23 @@ export default function InicioPage() {
                   </small>
 
                   <small style={{ display: "block" }}>
-                    Inicio: {formatearFecha(trabajo.fecha_inicio)}
+                    Inicio:{" "}
+                    {formatearFecha(
+                      trabajo.fecha_inicio
+                    )}
                   </small>
                 </div>
 
                 <div style={{ textAlign: "right" }}>
-                  <strong>{formatearDuracion(minutos)}</strong>
+                  <strong>
+                    {formatearDuracion(minutos)}
+                  </strong>
 
                   <small style={{ display: "block" }}>
-                    {formatearDinero(trabajo.tarifa_hora)} por hora
+                    {formatearDinero(
+                      trabajo.tarifa_hora
+                    )}{" "}
+                    por hora
                   </small>
                 </div>
               </div>
@@ -758,7 +852,12 @@ export default function InicioPage() {
   );
 }
 
-function Card({ titulo, valor, texto, destacada = false }) {
+function Card({
+  titulo,
+  valor,
+  texto,
+  destacada = false,
+}) {
   return (
     <div
       style={{
@@ -767,15 +866,29 @@ function Card({ titulo, valor, texto, destacada = false }) {
       }}
     >
       <small>{titulo}</small>
-      <strong style={{ fontSize: 28 }}>{valor}</strong>
-      <span style={{ fontSize: 13, opacity: 0.82 }}>{texto}</span>
+
+      <strong style={{ fontSize: 28 }}>
+        {valor}
+      </strong>
+
+      <span
+        style={{
+          fontSize: 13,
+          opacity: 0.82,
+        }}
+      >
+        {texto}
+      </span>
     </div>
   );
 }
 
 function Acceso({ href, titulo }) {
   return (
-    <Link href={href} style={accesoRapido}>
+    <Link
+      href={href}
+      style={accesoRapido}
+    >
       {titulo}
     </Link>
   );
@@ -883,11 +996,27 @@ const rankingFila = {
 const posicionRanking = {
   width: 34,
   height: 34,
+  minWidth: 34,
   borderRadius: "50%",
   background: "#e5e7eb",
   display: "grid",
   placeItems: "center",
   fontWeight: "bold",
+};
+
+const posicionPrimero = {
+  background: "#fef3c7",
+  color: "#92400e",
+};
+
+const posicionSegundo = {
+  background: "#e5e7eb",
+  color: "#374151",
+};
+
+const posicionTercero = {
+  background: "#fed7aa",
+  color: "#9a3412",
 };
 
 const procesoFila = {
