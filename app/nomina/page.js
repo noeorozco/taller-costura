@@ -352,28 +352,27 @@ export default function NominaPage() {
     return `${anio}-${mes}-${dia}`;
   }
 
-  function convertirFechaLocal(fecha) {
-    if (!fecha) {
-      return null;
-    }
+ function convertirFechaLocal(fecha) {
+  if (!fecha) {
+    return null;
+  }
 
-    /*
-      Supabase puede devolver una fecha simple:
-      2026-09-21
+  // Si Supabase manda una fecha como:
+  // 2026-09-21
+  // o:
+  // 2026-09-21T00:00:00+00:00
+  //
+  // tomamos únicamente la parte YYYY-MM-DD.
+  // Así evitamos que JavaScript la convierta por zona horaria
+  // y termine mostrando el día anterior en México.
 
-      new Date("2026-09-21") la interpreta como UTC.
-      En México eso puede convertirse al día anterior.
+  if (typeof fecha === "string") {
+    const coincidencia = fecha.match(/^(\d{4})-(\d{2})-(\d{2})/);
 
-      Por eso, cuando recibimos YYYY-MM-DD,
-      construimos manualmente una fecha LOCAL.
-    */
-    if (
-      typeof fecha === "string" &&
-      /^\d{4}-\d{2}-\d{2}$/.test(fecha)
-    ) {
-      const [anio, mes, dia] = fecha
-        .split("-")
-        .map(Number);
+    if (coincidencia) {
+      const anio = Number(coincidencia[1]);
+      const mes = Number(coincidencia[2]);
+      const dia = Number(coincidencia[3]);
 
       return new Date(
         anio,
@@ -385,6 +384,21 @@ export default function NominaPage() {
         0
       );
     }
+  }
+
+  // Si ya recibimos un objeto Date,
+  // conservamos año, mes y día en horario local.
+  if (fecha instanceof Date) {
+    return new Date(
+      fecha.getFullYear(),
+      fecha.getMonth(),
+      fecha.getDate(),
+      0,
+      0,
+      0,
+      0
+    );
+  }
 
     return new Date(fecha);
   }
