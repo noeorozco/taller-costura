@@ -4,24 +4,28 @@ import { useEffect, useMemo, useState } from "react";
 import { supabase } from "@/lib/supabase";
 
 export default function NominaPage() {
+  const [semanaAbierta, setSemanaAbierta] = useState(null);
   const [asignaciones, setAsignaciones] = useState([]);
   const [trabajosTiempo, setTrabajosTiempo] = useState([]);
-  const [adeudosPendientes, setAdeudosPendientes] = useState([]);
-
-  const [semanaAbierta, setSemanaAbierta] = useState(null);
+  const [adeudos, setAdeudos] = useState([]);
   const [historial, setHistorial] = useState([]);
-
-  const [empleadoAbierto, setEmpleadoAbierto] = useState(null);
-  const [semanaHistorialAbierta, setSemanaHistorialAbierta] =
-    useState(null);
 
   const [cargando, setCargando] = useState(true);
   const [cerrando, setCerrando] = useState(false);
+  const [empleadoAbierto, setEmpleadoAbierto] = useState(null);
   const [mensaje, setMensaje] = useState("");
 
   useEffect(() => {
     cargarTodo();
   }, []);
+
+  function mostrarMensaje(texto) {
+    setMensaje(texto);
+
+    setTimeout(() => {
+      setMensaje("");
+    }, 4000);
+  }
 
   async function cargarTodo() {
     setCargando(true);
@@ -29,15 +33,16 @@ export default function NominaPage() {
     try {
       const semana = await obtenerOCrearSemanaAbierta();
 
+      setSemanaAbierta(semana);
+
       await Promise.all([
-        cargarAsignacionesPendientes(),
-        cargarTrabajosTiempoPendientes(),
+        cargarAsignacionesPendientes(semana),
+        cargarTrabajosTiempoPendientes(semana),
         cargarAdeudosPendientes(),
         cargarHistorial(),
       ]);
-
-      setSemanaAbierta(semana);
     } catch (error) {
+      console.error("Error cargando nómina:", error);
       alert(error.message || "No se pudo cargar la nómina");
     } finally {
       setCargando(false);
@@ -45,38 +50,101 @@ export default function NominaPage() {
   }
 
   async function obtenerOCrearSemanaAbierta() {
-    const { data: existente, error: errorConsulta } = await supabase
-      .from("semanas_nomina")
-      .select("*")
-      .eq("estado", "Abierta")
-      .order("id", { ascending: false })
-      .limit(1)
-      .maybeSingle();
-
-    if (errorConsulta) throw errorConsulta;
-
-    if (existente) return existente;
-
     const lunes = obtenerLunesActual();
+    const fechaInicio = formatearFechaBD(lunes);
 
-    const { data: nueva, error: errorCreacion } = await supabase
+    /*
+      IMPORTANTE:
+      Ya no buscamos simplemente "la última semana abierta".
+
+      Ahora buscamos específicamente una semana abierta cuyo
+      fecha_inicio sea el lunes de la semana ACTUAL.
+
+      Esto evita que una semana antigua, por ejemplo la del
+      3 de agosto, siga apareciendo en septiembre.
+    */
+    const { data: semanaActual, error: errorActual } =
+      await supabase
+        .from("semanas_nomina")
+        .select("*")
+        .eq("estado", "Abierta")
+        .eq("fecha_inicio", fechaInicio)
+        .limit(1)
+        .maybeSingle();
+
+    if (errorActual) {
+      throw errorActual;
+    }
+
+    if (semanaActual) {
+      return semanaActual;
+    }
+
+    /*
+      Si existe alguna semana antigua que se quedó abierta,
+      la cerramos administrativamente.
+
+      No asignamos trabajos a esa semana aquí.
+      Simplemente impedimos que siga apareciendo como actual.
+    */
+    const { error: errorSemanasViejas } = await supabase
       .from("semanas_nomina")
-      .insert([
-        {
-          fecha_inicio: lunes.toISOString(),
-          estado: "Abierta",
-          total_nomina: 0,
-        },
-      ])
-      .select()
-      .single();
+      .update({
+        estado: "Cerrada",
+        fecha_cierre: new Date().toISOString(),
+      })
+      .eq("estado", "Abierta")
+      .neq("fecha_inicio", fechaInicio);
 
-    if (errorCreacion) throw errorCreacion;
+    if (errorSemanasViejas) {
+      throw errorSemanasViejas;
+    }
 
-    return nueva;
+    /*
+      Creamos la semana vigente.
+
+      Guardamos YYYY-MM-DD en vez de convertir el lunes
+      directamente a UTC. Esto evita desfases de fecha
+      por la zona horaria de México.
+    */
+    const { data: nuevaSemana, error: errorCreacion } =
+      await supabase
+        .from("semanas_nomina")
+        .insert([
+          {
+            fecha_inicio: fechaInicio,
+            estado: "Abierta",
+            total_nomina: 0,
+          },
+        ])
+        .select()
+        .single();
+
+    if (errorCreacion) {
+      throw errorCreacion;
+    }
+
+    return nuevaSemana;
   }
 
-  async function cargarAsignacionesPendientes() {
+  async function cargarAsignacionesPendientes(semana = null) {
+    const semanaUsar = semana || semanaAbierta;
+
+    if (!semanaUsar?.fecha_inicio) {
+      setAsignaciones([]);
+      return;
+    }
+
+    const inicio = convertirFechaLocal(
+      semanaUsar.fecha_inicio
+    );
+
+    inicio.setHours(0, 0, 0, 0);
+
+    const fin = obtenerSabadoDesdeInicio(
+      semanaUsar.fecha_inicio
+    );
+
     const { data, error } = await supabase
       .from("asignaciones")
       .select(`
@@ -88,26 +156,69 @@ export default function NominaPage() {
         estado,
         fecha_terminado,
         semana_nomina_id,
-        empleados(id,nombre,alias,puesto),
-        modelo_procesos(id,nombre,costo),
-        orden_bultos_v2(id,nombre_bulto,talla,cantidad),
+        empleados(
+          id,
+          nombre,
+          alias,
+          puesto
+        ),
+        modelo_procesos(
+          id,
+          nombre,
+          costo
+        ),
+        orden_bultos_v2(
+          id,
+          nombre_bulto,
+          talla,
+          cantidad
+        ),
         ordenes(
           id,
           folio,
           cliente,
-          modelos(id,codigo,nombre)
+          modelos(
+            id,
+            codigo,
+            nombre
+          )
         )
       `)
       .eq("estado", "Terminado")
       .is("semana_nomina_id", null)
-      .order("fecha_terminado", { ascending: true });
+      .gte("fecha_terminado", inicio.toISOString())
+      .lte("fecha_terminado", fin.toISOString())
+      .order("fecha_terminado", {
+        ascending: true,
+      });
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
     setAsignaciones(data || []);
   }
 
-  async function cargarTrabajosTiempoPendientes() {
+  async function cargarTrabajosTiempoPendientes(
+    semana = null
+  ) {
+    const semanaUsar = semana || semanaAbierta;
+
+    if (!semanaUsar?.fecha_inicio) {
+      setTrabajosTiempo([]);
+      return;
+    }
+
+    const inicio = convertirFechaLocal(
+      semanaUsar.fecha_inicio
+    );
+
+    inicio.setHours(0, 0, 0, 0);
+
+    const fin = obtenerSabadoDesdeInicio(
+      semanaUsar.fecha_inicio
+    );
+
     const { data, error } = await supabase
       .from("trabajos_tiempo")
       .select(`
@@ -123,39 +234,69 @@ export default function NominaPage() {
         total_pago,
         estado,
         semana_id,
-        empleados(id,nombre,alias,puesto),
+        empleados(
+          id,
+          nombre,
+          alias,
+          puesto
+        ),
         ordenes(
           id,
           folio,
           cliente,
-          modelos(id,codigo,nombre)
+          modelos(
+            id,
+            codigo,
+            nombre
+          )
         ),
-        modelo_procesos(id,nombre)
+        modelo_procesos(
+          id,
+          nombre
+        )
       `)
       .eq("estado", "Terminado")
       .is("semana_id", null)
-      .order("fecha_fin", { ascending: true });
+      .gte("fecha_fin", inicio.toISOString())
+      .lte("fecha_fin", fin.toISOString())
+      .order("fecha_fin", {
+        ascending: true,
+      });
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
     setTrabajosTiempo(data || []);
   }
 
   async function cargarAdeudosPendientes() {
     const { data, error } = await supabase
-      .from("empleado_adeudos")
+      .from("prestamos")
       .select(`
         id,
         empleado_id,
-        saldo,
-        estado
+        monto,
+        fecha,
+        descripcion,
+        estado,
+        empleados(
+          id,
+          nombre,
+          alias,
+          puesto
+        )
       `)
-      .eq("estado", "pendiente")
-      .gt("saldo", 0);
+      .eq("estado", "Pendiente")
+      .order("fecha", {
+        ascending: true,
+      });
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
-    setAdeudosPendientes(data || []);
+    setAdeudos(data || []);
   }
 
   async function cargarHistorial() {
@@ -166,1043 +307,1353 @@ export default function NominaPage() {
         fecha_inicio,
         fecha_cierre,
         estado,
-        total_nomina,
-        nomina_semanal_detalle(
-          id,
-          empleado_id,
-          pago_pieza,
-          pago_hora,
-          total_pago,
-          pago_bruto,
-          descuento_adeudo,
-          total_neto,
-          empleados(id,nombre,alias,puesto)
-        )
+        total_nomina
       `)
       .eq("estado", "Cerrada")
-      .order("fecha_cierre", { ascending: false })
-      .limit(15);
+      .order("id", {
+        ascending: false,
+      })
+      .limit(20);
 
-    if (error) throw error;
+    if (error) {
+      throw error;
+    }
 
     setHistorial(data || []);
   }
 
-  function calcularPagoAsignacion(asignacion) {
+  function obtenerLunesActual() {
+    const fecha = new Date();
+    const dia = fecha.getDay();
+
+    const diferencia =
+      dia === 0 ? -6 : 1 - dia;
+
+    fecha.setDate(
+      fecha.getDate() + diferencia
+    );
+
+    fecha.setHours(0, 0, 0, 0);
+
+    return fecha;
+  }
+
+  function formatearFechaBD(fecha) {
+    const anio = fecha.getFullYear();
+
+    const mes = String(
+      fecha.getMonth() + 1
+    ).padStart(2, "0");
+
+    const dia = String(
+      fecha.getDate()
+    ).padStart(2, "0");
+
+    return `${anio}-${mes}-${dia}`;
+  }
+
+  function convertirFechaLocal(fecha) {
+    if (!fecha) {
+      return null;
+    }
+
+    /*
+      Supabase puede devolver una fecha simple:
+      2026-09-21
+
+      new Date("2026-09-21") la interpreta como UTC.
+      En México eso puede convertirse al día anterior.
+
+      Por eso, cuando recibimos YYYY-MM-DD,
+      construimos manualmente una fecha LOCAL.
+    */
+    if (
+      typeof fecha === "string" &&
+      /^\d{4}-\d{2}-\d{2}$/.test(fecha)
+    ) {
+      const [anio, mes, dia] = fecha
+        .split("-")
+        .map(Number);
+
+      return new Date(
+        anio,
+        mes - 1,
+        dia,
+        0,
+        0,
+        0,
+        0
+      );
+    }
+
+    return new Date(fecha);
+  }
+
+  function obtenerSabadoDesdeInicio(fechaInicio) {
+    const fecha =
+      convertirFechaLocal(fechaInicio);
+
+    fecha.setDate(
+      fecha.getDate() + 5
+    );
+
+    /*
+      Tu cierre habitual es:
+      sábado a las 2:00 p. m.
+    */
+    fecha.setHours(14, 0, 0, 0);
+
+    return fecha;
+  }
+
+  function calcularPagoPaso(asignacion) {
     const cantidad = Number(
       asignacion.orden_bultos_v2?.cantidad || 0
     );
 
-    const precioPaso = Number(
+    const costo = Number(
       asignacion.modelo_procesos?.costo || 0
     );
 
-    return cantidad * precioPaso;
+    return cantidad * costo;
   }
 
-  const nominaPorEmpleado = useMemo(() => {
+  function formatearDinero(valor) {
+    return Number(valor || 0).toLocaleString(
+      "es-MX",
+      {
+        style: "currency",
+        currency: "MXN",
+      }
+    );
+  }
+
+  function formatearFecha(fecha) {
+    if (!fecha) {
+      return "—";
+    }
+
+    return new Date(fecha).toLocaleString(
+      "es-MX",
+      {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }
+    );
+  }
+
+  function formatearSoloFecha(fecha) {
+    if (!fecha) {
+      return "—";
+    }
+
+    const fechaLocal =
+      convertirFechaLocal(fecha);
+
+    return fechaLocal.toLocaleDateString(
+      "es-MX",
+      {
+        day: "numeric",
+        month: "long",
+        year: "numeric",
+      }
+    );
+  }
+
+  function formatearDuracion(minutos) {
+    const total = Number(
+      minutos || 0
+    );
+
+    const horas = Math.floor(
+      total / 60
+    );
+
+    const restantes =
+      total % 60;
+
+    if (horas === 0) {
+      return `${restantes} min`;
+    }
+
+    return `${horas} h ${restantes} min`;
+  }
+
+  const detalleTrabajadores = useMemo(() => {
     const mapa = new Map();
 
-    function obtenerResumen(registro) {
-      const id = Number(registro.empleado_id);
-      const empleado = registro.empleados;
+    function obtenerEmpleado(
+      empleadoId,
+      datosEmpleado
+    ) {
+      const id = Number(empleadoId);
 
       if (!mapa.has(id)) {
         mapa.set(id, {
           empleadoId: id,
+
           nombre:
-            empleado?.alias ||
-            empleado?.nombre ||
+            datosEmpleado?.alias ||
+            datosEmpleado?.nombre ||
             `Empleado ${id}`,
-          nombreCompleto: empleado?.nombre || "",
-          puesto: empleado?.puesto || "",
+
+          nombreCompleto:
+            datosEmpleado?.nombre ||
+            "",
+
+          puesto:
+            datosEmpleado?.puesto ||
+            "",
 
           pagoPasos: 0,
           pagoHoras: 0,
+          bruto: 0,
+          adeudo: 0,
+          netoEstimado: 0,
 
-          totalBruto: 0,
-          adeudoPendiente: 0,
-          descuentoSugerido: 0,
-          totalNeto: 0,
+          asignaciones: [],
+          trabajosTiempo: [],
+          adeudos: [],
 
-          bultosTerminados: 0,
-          unidadesProcesadas: 0,
+          totalBultos: 0,
+          totalTrabajosHora: 0,
           minutosTrabajados: 0,
-
-          detallePasos: [],
-          detalleHoras: [],
         });
       }
 
       return mapa.get(id);
     }
 
-    asignaciones.forEach((asignacion) => {
-      const resumen = obtenerResumen(asignacion);
+    asignaciones.forEach(
+      (registro) => {
+        const trabajador =
+          obtenerEmpleado(
+            registro.empleado_id,
+            registro.empleados
+          );
 
-      const cantidad = Number(
-        asignacion.orden_bultos_v2?.cantidad || 0
-      );
+        const pago =
+          calcularPagoPaso(registro);
 
-      const precioPaso = Number(
-        asignacion.modelo_procesos?.costo || 0
-      );
+        trabajador.pagoPasos += pago;
+        trabajador.bruto += pago;
+        trabajador.totalBultos += 1;
 
-      const pago = calcularPagoAsignacion(asignacion);
+        trabajador.asignaciones.push({
+          ...registro,
+          pagoCalculado: pago,
+        });
+      }
+    );
 
-      resumen.pagoPasos += pago;
-      resumen.totalBruto += pago;
-      resumen.bultosTerminados += 1;
-      resumen.unidadesProcesadas += cantidad;
+    trabajosTiempo.forEach(
+      (registro) => {
+        const trabajador =
+          obtenerEmpleado(
+            registro.empleado_id,
+            registro.empleados
+          );
 
-      resumen.detallePasos.push({
-        id: asignacion.id,
-        fecha: asignacion.fecha_terminado,
-        orden: asignacion.ordenes?.folio || "Sin orden",
-        modelo:
-          asignacion.ordenes?.modelos?.codigo || "Sin modelo",
-        proceso:
-          asignacion.modelo_procesos?.nombre || "Sin proceso",
-        bulto:
-          asignacion.orden_bultos_v2?.nombre_bulto ||
-          "Sin bulto",
-        talla:
-          asignacion.orden_bultos_v2?.talla || "Sin talla",
-        cantidad,
-        precioPaso,
-        total: pago,
-      });
-    });
-
-    trabajosTiempo.forEach((trabajo) => {
-      const resumen = obtenerResumen(trabajo);
-
-      const pago = Number(trabajo.total_pago || 0);
-
-      const minutos = Number(
-        trabajo.minutos_trabajados || 0
-      );
-
-      resumen.pagoHoras += pago;
-      resumen.totalBruto += pago;
-      resumen.minutosTrabajados += minutos;
-
-      resumen.detalleHoras.push({
-        id: trabajo.id,
-        fecha: trabajo.fecha_fin,
-        descripcion:
-          trabajo.descripcion || "Trabajo por hora",
-        orden: trabajo.ordenes?.folio || "Sin orden",
-        modelo:
-          trabajo.ordenes?.modelos?.codigo || "Sin modelo",
-        proceso:
-          trabajo.modelo_procesos?.nombre ||
-          "Sin proceso específico",
-        minutos,
-        tarifa: Number(trabajo.tarifa_hora || 0),
-        total: pago,
-      });
-    });
-
-    mapa.forEach((empleado) => {
-      const adeudoTotal = adeudosPendientes
-        .filter(
-          (adeudo) =>
-            Number(adeudo.empleado_id) ===
-            Number(empleado.empleadoId)
-        )
-        .reduce(
-          (total, adeudo) =>
-            total + Number(adeudo.saldo || 0),
-          0
+        const pago = Number(
+          registro.total_pago || 0
         );
 
-      empleado.adeudoPendiente = adeudoTotal;
+        trabajador.pagoHoras += pago;
+        trabajador.bruto += pago;
+        trabajador.totalTrabajosHora += 1;
 
-      /*
-        Por ahora mostramos cuánto podría descontarse.
-        Todavía no se registra ni se modifica el adeudo.
-      */
-      empleado.descuentoSugerido = Math.min(
-        empleado.totalBruto,
-        adeudoTotal
-      );
+        trabajador.minutosTrabajados +=
+          Number(
+            registro.minutos_trabajados || 0
+          );
 
-      empleado.totalNeto = Math.max(
-        empleado.totalBruto -
-          empleado.descuentoSugerido,
-        0
-      );
-    });
-
-    return [...mapa.values()].sort((a, b) =>
-      a.nombre.localeCompare(b.nombre)
+        trabajador.trabajosTiempo.push(
+          registro
+        );
+      }
     );
+
+    adeudos.forEach(
+      (registro) => {
+        const trabajador =
+          obtenerEmpleado(
+            registro.empleado_id,
+            registro.empleados
+          );
+
+        const monto = Number(
+          registro.monto || 0
+        );
+
+        trabajador.adeudo += monto;
+
+        trabajador.adeudos.push(
+          registro
+        );
+      }
+    );
+
+    const resultado =
+      [...mapa.values()]
+        .map((trabajador) => ({
+          ...trabajador,
+
+          netoEstimado:
+            trabajador.bruto -
+            trabajador.adeudo,
+        }))
+        .filter(
+          (trabajador) =>
+            trabajador.bruto > 0 ||
+            trabajador.adeudo > 0
+        )
+        .sort(
+          (a, b) =>
+            b.bruto - a.bruto
+        );
+
+    return resultado;
   }, [
     asignaciones,
     trabajosTiempo,
-    adeudosPendientes,
+    adeudos,
   ]);
 
   const totales = useMemo(() => {
-    return nominaPorEmpleado.reduce(
-      (acumulado, empleado) => {
-        acumulado.pasos += empleado.pagoPasos;
-        acumulado.horas += empleado.pagoHoras;
-        acumulado.bruto += empleado.totalBruto;
-        acumulado.adeudos += empleado.adeudoPendiente;
-        acumulado.descuentoSugerido +=
-          empleado.descuentoSugerido;
-        acumulado.neto += empleado.totalNeto;
+    const pagoPasos =
+      detalleTrabajadores.reduce(
+        (total, trabajador) =>
+          total +
+          Number(
+            trabajador.pagoPasos || 0
+          ),
+        0
+      );
 
-        acumulado.bultos += empleado.bultosTerminados;
-        acumulado.unidades += empleado.unidadesProcesadas;
-        acumulado.minutos += empleado.minutosTrabajados;
+    const pagoHoras =
+      detalleTrabajadores.reduce(
+        (total, trabajador) =>
+          total +
+          Number(
+            trabajador.pagoHoras || 0
+          ),
+        0
+      );
 
-        return acumulado;
-      },
-      {
-        pasos: 0,
-        horas: 0,
-        bruto: 0,
-        adeudos: 0,
-        descuentoSugerido: 0,
-        neto: 0,
-        bultos: 0,
-        unidades: 0,
-        minutos: 0,
-      }
-    );
-  }, [nominaPorEmpleado]);
+    const bruto =
+      pagoPasos + pagoHoras;
 
-  function obtenerLunesActual() {
-    const fecha = new Date();
-    const dia = fecha.getDay();
-    const diferencia = dia === 0 ? -6 : 1 - dia;
+    const adeudo =
+      detalleTrabajadores.reduce(
+        (total, trabajador) =>
+          total +
+          Number(
+            trabajador.adeudo || 0
+          ),
+        0
+      );
 
-    fecha.setDate(fecha.getDate() + diferencia);
-    fecha.setHours(0, 0, 0, 0);
+    return {
+      pagoPasos,
+      pagoHoras,
+      bruto,
+      adeudo,
+      netoEstimado:
+        bruto - adeudo,
 
-    return fecha;
-  }
-
-  function obtenerSabadoDesdeInicio(fechaInicio) {
-    const fecha = new Date(fechaInicio);
-
-    fecha.setDate(fecha.getDate() + 5);
-    fecha.setHours(14, 0, 0, 0);
-
-    return fecha;
-  }
-
-  function formatearFecha(fecha) {
-    if (!fecha) return "—";
-
-    return new Date(fecha).toLocaleString("es-MX", {
-      dateStyle: "medium",
-      timeStyle: "short",
-    });
-  }
-
-  function formatearSoloFecha(fecha) {
-    if (!fecha) return "—";
-
-    return new Date(fecha).toLocaleDateString("es-MX", {
-      day: "numeric",
-      month: "long",
-      year: "numeric",
-    });
-  }
-
-  function formatearDuracion(minutos) {
-    const total = Number(minutos || 0);
-    const horas = Math.floor(total / 60);
-    const restantes = total % 60;
-
-    if (horas === 0) return `${restantes} min`;
-
-    return `${horas} h ${restantes} min`;
-  }
-
-  function mostrarMensaje(texto) {
-    setMensaje(texto);
-
-    setTimeout(() => {
-      setMensaje("");
-    }, 4000);
-  }
-
-  async function cerrarSemana() {
+      trabajadoresConPago:
+        detalleTrabajadores.filter(
+          (trabajador) =>
+            trabajador.bruto > 0
+        ).length,
+    };
+  }, [detalleTrabajadores]);
+    async function cerrarSemana() {
     if (!semanaAbierta) {
-      alert("No existe una semana abierta");
+      alert("No hay una semana abierta.");
       return;
     }
 
-    if (nominaPorEmpleado.length === 0) {
+    if (cerrando) {
+      return;
+    }
+
+    const trabajadoresConPago =
+      detalleTrabajadores.filter(
+        (trabajador) =>
+          trabajador.bruto > 0
+      );
+
+    if (
+      trabajadoresConPago.length === 0
+    ) {
       alert(
-        "No hay entregas ni trabajos por hora pendientes de pago"
+        "No hay trabajos terminados para cerrar esta semana."
       );
       return;
     }
 
-    /*
-      En este primer paso el cierre conserva el total bruto.
-      El descuento se muestra solamente como información.
-    */
-    const confirmar = confirm(
-      `¿Cerrar la semana?\n\n` +
-        `Trabajadores: ${nominaPorEmpleado.length}\n` +
-        `Pago por pasos: $${totales.pasos.toFixed(2)}\n` +
-        `Pago por hora: $${totales.horas.toFixed(2)}\n` +
-        `Nómina bruta: $${totales.bruto.toFixed(2)}\n\n` +
-        `Los adeudos todavía no se descontarán automáticamente.\n\n` +
-        `Los bultos que no se hayan entregado continuarán asignados para la siguiente semana.`
+    const confirmar = window.confirm(
+      `¿Cerrar la semana con una nómina bruta de ${formatearDinero(
+        totales.bruto
+      )}?\n\n` +
+        "Solo se incluirán los bultos entregados y los trabajos por hora terminados de esta semana."
     );
 
-    if (!confirmar) return;
+    if (!confirmar) {
+      return;
+    }
 
     setCerrando(true);
 
     try {
-      const detalles = nominaPorEmpleado.map((empleado) => ({
-        semana_id: semanaAbierta.id,
-        empleado_id: empleado.empleadoId,
+      /*
+        1. Creamos el detalle de nómina
+        para cada trabajador que tenga pago.
+      */
+      const detallesNomina =
+        trabajadoresConPago.map(
+          (trabajador) => ({
+            semana_id:
+              semanaAbierta.id,
 
-        pago_pieza: Number(
-          empleado.pagoPasos.toFixed(2)
-        ),
+            empleado_id:
+              trabajador.empleadoId,
 
-        pago_hora: Number(
-          empleado.pagoHoras.toFixed(2)
-        ),
+            pago_pieza:
+              Number(
+                trabajador.pagoPasos || 0
+              ),
 
-        /*
-          Conservamos el pago normal mientras el descuento
-          todavía sea solamente informativo.
-        */
-        total_pago: Number(
-          empleado.totalBruto.toFixed(2)
-        ),
+            pago_hora:
+              Number(
+                trabajador.pagoHoras || 0
+              ),
 
-        pago_bruto: Number(
-          empleado.totalBruto.toFixed(2)
-        ),
+            total_pago:
+              Number(
+                trabajador.bruto || 0
+              ),
+          })
+        );
 
-        descuento_adeudo: 0,
-
-        total_neto: Number(
-          empleado.totalBruto.toFixed(2)
-        ),
-      }));
-
-      const { error: errorDetalles } = await supabase
+      const {
+        error: errorDetalle,
+      } = await supabase
         .from("nomina_semanal_detalle")
-        .insert(detalles);
+        .insert(detallesNomina);
 
-      if (errorDetalles) throw errorDetalles;
+      if (errorDetalle) {
+        throw errorDetalle;
+      }
 
-      if (asignaciones.length > 0) {
-        const ids = asignaciones.map(
+      /*
+        2. Marcamos las asignaciones
+        pagadas con la semana que estamos
+        cerrando.
+      */
+      const idsAsignaciones =
+        asignaciones.map(
           (registro) => registro.id
         );
 
-        const { error } = await supabase
+      if (
+        idsAsignaciones.length > 0
+      ) {
+        const {
+          error:
+            errorAsignaciones,
+        } = await supabase
           .from("asignaciones")
           .update({
-            semana_nomina_id: semanaAbierta.id,
+            semana_nomina_id:
+              semanaAbierta.id,
           })
-          .in("id", ids)
-          .is("semana_nomina_id", null);
+          .in(
+            "id",
+            idsAsignaciones
+          );
 
-        if (error) throw error;
+        if (errorAsignaciones) {
+          throw errorAsignaciones;
+        }
       }
 
-      if (trabajosTiempo.length > 0) {
-        const ids = trabajosTiempo.map(
+      /*
+        3. Marcamos los trabajos por tiempo
+        pagados con la semana cerrada.
+      */
+      const idsTrabajosTiempo =
+        trabajosTiempo.map(
           (registro) => registro.id
         );
 
-        const { error } = await supabase
+      if (
+        idsTrabajosTiempo.length > 0
+      ) {
+        const {
+          error:
+            errorTrabajosTiempo,
+        } = await supabase
           .from("trabajos_tiempo")
           .update({
-            semana_id: semanaAbierta.id,
+            semana_id:
+              semanaAbierta.id,
           })
-          .in("id", ids)
-          .is("semana_id", null);
+          .in(
+            "id",
+            idsTrabajosTiempo
+          );
 
-        if (error) throw error;
+        if (errorTrabajosTiempo) {
+          throw errorTrabajosTiempo;
+        }
       }
 
-            const fechaCierre = new Date();
-
-      const { error: errorCierre } = await supabase
+      /*
+        4. Cerramos la semana actual.
+      */
+      const {
+        error: errorCerrarSemana,
+      } = await supabase
         .from("semanas_nomina")
         .update({
           estado: "Cerrada",
-          fecha_cierre: fechaCierre.toISOString(),
-          total_nomina: Number(
-            totales.bruto.toFixed(2)
-          ),
+          fecha_cierre:
+            new Date().toISOString(),
+          total_nomina:
+            Number(
+              totales.bruto || 0
+            ),
         })
-        .eq("id", semanaAbierta.id);
+        .eq(
+          "id",
+          semanaAbierta.id
+        );
 
-      if (errorCierre) throw errorCierre;
+      if (errorCerrarSemana) {
+        throw errorCerrarSemana;
+      }
 
-      const siguienteInicio = new Date(
-        semanaAbierta.fecha_inicio
+      /*
+        IMPORTANTE:
+
+        Ya NO creamos la siguiente semana
+        sumándole 7 días a la anterior.
+
+        Volvemos a resolver cuál es la
+        semana que corresponde a la fecha
+        actual.
+
+        Esto evita que una semana antigua
+        vaya arrastrando fechas incorrectas.
+      */
+      const nuevaSemana =
+        await obtenerOCrearSemanaAbierta();
+
+      setSemanaAbierta(
+        nuevaSemana
       );
 
-      siguienteInicio.setDate(
-        siguienteInicio.getDate() + 7
-      );
-
-      const { data: nuevaSemana, error: errorNuevaSemana } =
-        await supabase
-          .from("semanas_nomina")
-          .insert([
-            {
-              fecha_inicio: siguienteInicio.toISOString(),
-              estado: "Abierta",
-              total_nomina: 0,
-            },
-          ])
-          .select()
-          .single();
-
-      if (errorNuevaSemana) throw errorNuevaSemana;
-
-      setSemanaAbierta(nuevaSemana);
       setEmpleadoAbierto(null);
 
       mostrarMensaje(
-        `Semana cerrada. Nómina total: $${totales.bruto.toFixed(
-          2
+        `Semana cerrada. Nómina total: ${formatearDinero(
+          totales.bruto
         )}`
       );
 
       await Promise.all([
-        cargarAsignacionesPendientes(),
-        cargarTrabajosTiempoPendientes(),
+        cargarAsignacionesPendientes(
+          nuevaSemana
+        ),
+
+        cargarTrabajosTiempoPendientes(
+          nuevaSemana
+        ),
+
         cargarAdeudosPendientes(),
+
         cargarHistorial(),
       ]);
     } catch (error) {
+      console.error(
+        "Error cerrando semana:",
+        error
+      );
+
       alert(
         error.message ||
-          "No se pudo completar el cierre semanal"
+          "No se pudo cerrar la semana"
       );
     } finally {
       setCerrando(false);
     }
   }
 
-  if (cargando) {
-    return <h2>Cargando nómina...</h2>;
-  }
+  const fechaCierreSemana =
+    semanaAbierta?.fecha_inicio
+      ? obtenerSabadoDesdeInicio(
+          semanaAbierta.fecha_inicio
+        )
+      : null;
 
-  const finSemana = semanaAbierta
-    ? obtenerSabadoDesdeInicio(
-        semanaAbierta.fecha_inicio
-      )
-    : null;
+  if (cargando) {
+    return (
+      <div>
+        <h2>
+          Cargando nómina...
+        </h2>
+      </div>
+    );
+  }
 
   return (
     <div>
-      <h1>💵 Nómina semanal</h1>
+      <div style={encabezadoPagina}>
+        <div>
+          <h1
+            style={{
+              marginBottom: 4,
+            }}
+          >
+            💵 Nómina semanal
+          </h1>
+
+          <p
+            style={{
+              marginTop: 0,
+              color: "#6b7280",
+            }}
+          >
+            Control de pagos por
+            producción y trabajos por
+            tiempo
+          </p>
+        </div>
+
+        <button
+          type="button"
+          onClick={cargarTodo}
+          style={botonActualizar}
+        >
+          🔄 Actualizar
+        </button>
+      </div>
 
       {mensaje && (
-        <div style={alerta}>
+        <div style={mensajeExito}>
           {mensaje}
         </div>
       )}
 
-      <section style={card}>
-        <div style={encabezadoSemana}>
-          <div>
-            <h2 style={{ margin: 0 }}>
-              Semana actual
-            </h2>
+      {semanaAbierta && (
+        <section style={card}>
+          <div
+            style={
+              encabezadoSemana
+            }
+          >
+            <div>
+              <small>
+                Semana actual
+              </small>
 
-            <p>
-              Del{" "}
-              <strong>
+              <h3
+                style={{
+                  margin:
+                    "4px 0",
+                }}
+              >
+                Del{" "}
                 {formatearSoloFecha(
-                  semanaAbierta?.fecha_inicio
+                  semanaAbierta.fecha_inicio
+                )}{" "}
+                al{" "}
+                {formatearSoloFecha(
+                  fechaCierreSemana
                 )}
-              </strong>{" "}
-              al{" "}
-              <strong>
-                {formatearSoloFecha(finSemana)}
-              </strong>
-            </p>
+              </h3>
 
-            <small>
-              Cierre habitual: sábado a las 2:00 p. m.
-            </small>
-          </div>
+              <small>
+                Cierre habitual:
+                sábado a las
+                2:00 p. m.
+              </small>
+            </div>
 
-          <div style={estadoAbierto}>
-            🟢 ABIERTA
+            <div
+              style={
+                etiquetaAbierta
+              }
+            >
+              🟢 ABIERTA
+            </div>
           </div>
+        </section>
+      )}
+
+      <section style={resumenGrid}>
+        <div style={tarjetaResumen}>
+          <small>
+            Pago por pasos
+          </small>
+
+          <strong>
+            {formatearDinero(
+              totales.pagoPasos
+            )}
+          </strong>
+        </div>
+
+        <div style={tarjetaResumen}>
+          <small>
+            Pago por hora
+          </small>
+
+          <strong>
+            {formatearDinero(
+              totales.pagoHoras
+            )}
+          </strong>
+        </div>
+
+        <div style={tarjetaResumen}>
+          <small>
+            Trabajadores con pago
+          </small>
+
+          <strong>
+            {
+              totales.trabajadoresConPago
+            }
+          </strong>
+        </div>
+
+        <div style={tarjetaResumen}>
+          <small>
+            Nómina bruta
+          </small>
+
+          <strong>
+            {formatearDinero(
+              totales.bruto
+            )}
+          </strong>
+        </div>
+
+        <div style={tarjetaAdeudo}>
+          <small>
+            Descuento informativo
+          </small>
+
+          <strong>
+            -
+            {formatearDinero(
+              totales.adeudo
+            )}
+          </strong>
+        </div>
+
+        <div style={tarjetaNeto}>
+          <small>
+            Neto estimado
+          </small>
+
+          <strong>
+            {formatearDinero(
+              totales.netoEstimado
+            )}
+          </strong>
         </div>
       </section>
 
-      <section style={resumenGeneral}>
-        <div style={tarjetaResumen}>
-          <small>Pago por pasos</small>
-
-          <strong>
-            ${totales.pasos.toFixed(2)}
-          </strong>
-        </div>
-
-        <div style={tarjetaResumen}>
-          <small>Pago por hora</small>
-
-          <strong>
-            ${totales.horas.toFixed(2)}
-          </strong>
-        </div>
-
-        <div style={tarjetaResumen}>
-          <small>Trabajadores con pago</small>
-
-          <strong>
-            {nominaPorEmpleado.length}
-          </strong>
-        </div>
-
-        <div style={tarjetaResumen}>
-          <small>Nómina bruta</small>
-
-          <strong>
-            ${totales.bruto.toFixed(2)}
-          </strong>
-        </div>
-
-        <div style={tarjetaResumenAdeudo}>
-          <small>Descuento informativo</small>
-
-          <strong>
-            -${totales.descuentoSugerido.toFixed(2)}
-          </strong>
-        </div>
-
-        <div style={tarjetaResumenDestacada}>
-          <small>Neto estimado</small>
-
-          <strong>
-            ${totales.neto.toFixed(2)}
-          </strong>
-        </div>
-      </section>
-
-      <div style={avisoInformativo}>
+      <div style={avisoAzul}>
         <strong>
           ℹ️ Vista informativa:
         </strong>{" "}
-        los adeudos todavía no se descuentan automáticamente.
-        La nómina se cerrará usando el pago bruto.
+        los adeudos todavía no se
+        descuentan automáticamente.
+        La nómina se cerrará usando
+        el pago bruto.
       </div>
 
       <section style={card}>
-        <h2>Detalle por trabajador</h2>
+        <h2
+          style={{
+            marginTop: 0,
+          }}
+        >
+          Detalle por trabajador
+        </h2>
 
-        {nominaPorEmpleado.length === 0 && (
-          <div style={sinRegistros}>
+        {detalleTrabajadores.length ===
+          0 && (
+          <div style={estadoVacio}>
             <strong>
-              La nómina actual está en cero.
+              La nómina actual está
+              en cero.
             </strong>
 
-            <p>
-              Se agregarán únicamente los bultos
-              entregados y los trabajos por hora
+            <span>
+              Se agregarán únicamente
+              los bultos entregados y
+              los trabajos por hora
               finalizados.
-            </p>
+            </span>
           </div>
         )}
 
-        {nominaPorEmpleado.map((empleado) => {
-          const abierto =
-            empleadoAbierto === empleado.empleadoId;
+        {detalleTrabajadores.map(
+          (trabajador) => {
+            const abierto =
+              empleadoAbierto ===
+              trabajador.empleadoId;
 
-          return (
-            <div
-              key={empleado.empleadoId}
-              style={empleadoCard}
-            >
-              <button
-                type="button"
-                onClick={() =>
-                  setEmpleadoAbierto(
-                    abierto
-                      ? null
-                      : empleado.empleadoId
-                  )
+            return (
+              <div
+                key={
+                  trabajador.empleadoId
                 }
-                style={botonEmpleado}
+                style={
+                  trabajadorCard
+                }
               >
-                <div style={{ textAlign: "left" }}>
-                  <strong style={{ fontSize: 18 }}>
-                    {empleado.nombre}
-                  </strong>
-
-                  <small style={{ display: "block" }}>
-                    {empleado.puesto || "Sin puesto"}
-                  </small>
-                </div>
-
-                <div style={totalesEmpleado}>
-                  <span>
-                    Pasos:{" "}
-                    <strong>
-                      ${empleado.pagoPasos.toFixed(2)}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setEmpleadoAbierto(
+                      abierto
+                        ? null
+                        : trabajador.empleadoId
+                    )
+                  }
+                  style={
+                    trabajadorResumen
+                  }
+                >
+                  <div
+                    style={{
+                      textAlign:
+                        "left",
+                    }}
+                  >
+                    <strong
+                      style={{
+                        fontSize: 17,
+                      }}
+                    >
+                      {
+                        trabajador.nombre
+                      }
                     </strong>
-                  </span>
 
-                  <span>
-                    Horas:{" "}
-                    <strong>
-                      ${empleado.pagoHoras.toFixed(2)}
-                    </strong>
-                  </span>
-
-                  <span style={totalBrutoEmpleado}>
-                    Bruto: $
-                    {empleado.totalBruto.toFixed(2)}
-                  </span>
-
-                  <span style={adeudoEmpleado}>
-                    Adeudo: $
-                    {empleado.adeudoPendiente.toFixed(2)}
-                  </span>
-
-                  <span style={netoEmpleado}>
-                    Neto estimado: $
-                    {empleado.totalNeto.toFixed(2)}
-                  </span>
-
-                  <span>
-                    {abierto ? "▲" : "▼"}
-                  </span>
-                </div>
-              </button>
-
-              {abierto && (
-                <div style={detalleEmpleado}>
-                  <div style={metricasEmpleado}>
-                    <div style={metricaCaja}>
-                      <small>Bultos terminados</small>
-
-                      <strong>
-                        {empleado.bultosTerminados}
-                      </strong>
-                    </div>
-
-                    <div style={metricaCaja}>
-                      <small>
-                        Unidades procesadas en sus pasos
-                      </small>
-
-                      <strong>
-                        {empleado.unidadesProcesadas}
-                      </strong>
-                    </div>
-
-                    <div style={metricaCaja}>
-                      <small>Tiempo pagado</small>
-
-                      <strong>
-                        {formatearDuracion(
-                          empleado.minutosTrabajados
-                        )}
-                      </strong>
-                    </div>
-
-                    <div style={metricaCaja}>
-                      <small>Adeudo pendiente</small>
-
-                      <strong style={{ color: "#b91c1c" }}>
-                        $
-                        {empleado.adeudoPendiente.toFixed(
-                          2
-                        )}
-                      </strong>
-                    </div>
-
-                    <div style={metricaCaja}>
-                      <small>
-                        Descuento máximo informativo
-                      </small>
-
-                      <strong style={{ color: "#b45309" }}>
-                        -$
-                        {empleado.descuentoSugerido.toFixed(
-                          2
-                        )}
-                      </strong>
-                    </div>
-
-                    <div style={metricaCaja}>
-                      <small>Neto estimado</small>
-
-                      <strong style={{ color: "#166534" }}>
-                        $
-                        {empleado.totalNeto.toFixed(2)}
-                      </strong>
-                    </div>
+                    <small
+                      style={{
+                        display:
+                          "block",
+                      }}
+                    >
+                      {trabajador.puesto ||
+                        "Sin puesto"}
+                    </small>
                   </div>
 
-                  {empleado.detallePasos.length > 0 && (
-                    <>
-                      <h3>🧵 Pago por pasos</h3>
+                  <div
+                    style={
+                      totalesTrabajador
+                    }
+                  >
+                    <span>
+                      Pasos:{" "}
+                      <strong>
+                        {formatearDinero(
+                          trabajador.pagoPasos
+                        )}
+                      </strong>
+                    </span>
 
-                      <div style={{ overflowX: "auto" }}>
-                        <table style={tabla}>
-                          <thead>
-                            <tr>
-                              <th style={th}>Fecha</th>
-                              <th style={th}>Orden</th>
-                              <th style={th}>Modelo</th>
-                              <th style={th}>Proceso</th>
-                              <th style={th}>Bulto</th>
-                              <th style={th}>Cantidad</th>
-                              <th style={th}>Precio</th>
-                              <th style={th}>Total</th>
-                            </tr>
-                          </thead>
+                    <span>
+                      Horas:{" "}
+                      <strong>
+                        {formatearDinero(
+                          trabajador.pagoHoras
+                        )}
+                      </strong>
+                    </span>
 
-                          <tbody>
-                            {empleado.detallePasos.map(
-                              (detalle) => (
-                                <tr key={detalle.id}>
-                                  <td style={td}>
-                                    {formatearFecha(
-                                      detalle.fecha
-                                    )}
-                                  </td>
+                    <span
+                      style={
+                        etiquetaBruto
+                      }
+                    >
+                      Bruto:{" "}
+                      {formatearDinero(
+                        trabajador.bruto
+                      )}
+                    </span>
 
-                                  <td style={td}>
-                                    {detalle.orden}
-                                  </td>
+                    <span
+                      style={
+                        etiquetaAdeudo
+                      }
+                    >
+                      Adeudo:{" "}
+                      {formatearDinero(
+                        trabajador.adeudo
+                      )}
+                    </span>
 
-                                  <td style={td}>
-                                    {detalle.modelo}
-                                  </td>
+                    <span
+                      style={
+                        etiquetaNeto
+                      }
+                    >
+                      Neto estimado:{" "}
+                      {formatearDinero(
+                        trabajador.netoEstimado
+                      )}
+                    </span>
 
-                                  <td style={td}>
-                                    {detalle.proceso}
-                                  </td>
+                    <strong>
+                      {abierto
+                        ? "▲"
+                        : "▼"}
+                    </strong>
+                  </div>
+                </button>
 
-                                  <td style={td}>
-                                    {detalle.bulto}
-                                  </td>
+                {abierto && (
+                  <div
+                    style={
+                      detalleTrabajador
+                    }
+                  >
+                    <div
+                      style={
+                        miniResumenGrid
+                      }
+                    >
+                      <div
+                        style={
+                          miniTarjeta
+                        }
+                      >
+                        <small>
+                          Bultos
+                          terminados
+                        </small>
 
-                                  <td style={td}>
-                                    {detalle.cantidad}
-                                  </td>
-
-                                  <td style={td}>
-                                    $
-                                    {detalle.precioPaso.toFixed(
-                                      2
-                                    )}
-                                  </td>
-
-                                  <td style={td}>
-                                    <strong>
-                                      $
-                                      {detalle.total.toFixed(
-                                        2
-                                      )}
-                                    </strong>
-                                  </td>
-                                </tr>
-                              )
-                            )}
-                          </tbody>
-                        </table>
+                        <strong>
+                          {
+                            trabajador.totalBultos
+                          }
+                        </strong>
                       </div>
-                    </>
-                  )}
 
-                  {empleado.detalleHoras.length > 0 && (
-                    <>
-                      <h3>⏱ Pago por hora</h3>
+                      <div
+                        style={
+                          miniTarjeta
+                        }
+                      >
+                        <small>
+                          Trabajos por
+                          hora
+                        </small>
 
-                      <div style={{ overflowX: "auto" }}>
-                        <table style={tabla}>
-                          <thead>
-                            <tr>
-                              <th style={th}>Fecha</th>
-                              <th style={th}>Actividad</th>
-                              <th style={th}>Orden</th>
-                              <th style={th}>Proceso</th>
-                              <th style={th}>Tiempo</th>
-                              <th style={th}>Tarifa</th>
-                              <th style={th}>Total</th>
-                            </tr>
-                          </thead>
-
-                          <tbody>
-                            {empleado.detalleHoras.map(
-                              (detalle) => (
-                                <tr key={detalle.id}>
-                                  <td style={td}>
-                                    {formatearFecha(
-                                      detalle.fecha
-                                    )}
-                                  </td>
-
-                                  <td style={td}>
-                                    {detalle.descripcion}
-                                  </td>
-
-                                  <td style={td}>
-                                    {detalle.orden}
-                                  </td>
-
-                                  <td style={td}>
-                                    {detalle.proceso}
-                                  </td>
-
-                                  <td style={td}>
-                                    {formatearDuracion(
-                                      detalle.minutos
-                                    )}
-                                  </td>
-
-                                  <td style={td}>
-                                    $
-                                    {detalle.tarifa.toFixed(
-                                      2
-                                    )}
-                                  </td>
-
-                                  <td style={td}>
-                                    <strong>
-                                      $
-                                      {detalle.total.toFixed(
-                                        2
-                                      )}
-                                    </strong>
-                                  </td>
-                                </tr>
-                              )
-                            )}
-                          </tbody>
-                        </table>
+                        <strong>
+                          {
+                            trabajador.totalTrabajosHora
+                          }
+                        </strong>
                       </div>
-                    </>
-                  )}
-                </div>
-              )}
-            </div>
-          );
-        })}
+
+                      <div
+                        style={
+                          miniTarjeta
+                        }
+                      >
+                        <small>
+                          Tiempo
+                          trabajado
+                        </small>
+
+                        <strong>
+                          {formatearDuracion(
+                            trabajador.minutosTrabajados
+                          )}
+                        </strong>
+                      </div>
+                    </div>
+
+                    {trabajador
+                      .asignaciones
+                      .length > 0 && (
+                      <>
+                        <h3>
+                          🧵 Pago por
+                          pasos
+                        </h3>
+
+                        {trabajador.asignaciones.map(
+                          (
+                            registro
+                          ) => (
+                            <div
+                              key={`asignacion-${registro.id}`}
+                              style={
+                                detalleFila
+                              }
+                            >
+                              <div>
+                                <strong>
+                                  {registro
+                                    .modelo_procesos
+                                    ?.nombre ||
+                                    "Sin proceso"}
+                                </strong>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  {registro
+                                    .orden_bultos_v2
+                                    ?.nombre_bulto ||
+                                    "Sin bulto"}{" "}
+                                  ·{" "}
+                                  {registro
+                                    .orden_bultos_v2
+                                    ?.cantidad ||
+                                    0}{" "}
+                                  unidades
+                                </small>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  Orden:{" "}
+                                  {registro
+                                    .ordenes
+                                    ?.folio ||
+                                    "Sin orden"}{" "}
+                                  · Modelo:{" "}
+                                  {registro
+                                    .ordenes
+                                    ?.modelos
+                                    ?.codigo ||
+                                    "Sin modelo"}
+                                </small>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  Entregado:{" "}
+                                  {formatearFecha(
+                                    registro.fecha_terminado
+                                  )}
+                                </small>
+                              </div>
+
+                              <strong>
+                                {formatearDinero(
+                                  registro.pagoCalculado
+                                )}
+                              </strong>
+                            </div>
+                          )
+                        )}
+                      </>
+                    )}
+
+                    {trabajador
+                      .trabajosTiempo
+                      .length > 0 && (
+                      <>
+                        <h3>
+                          ⏱ Pago por
+                          hora
+                        </h3>
+
+                        {trabajador.trabajosTiempo.map(
+                          (
+                            registro
+                          ) => (
+                            <div
+                              key={`tiempo-${registro.id}`}
+                              style={
+                                detalleFila
+                              }
+                            >
+                              <div>
+                                <strong>
+                                  {registro.descripcion ||
+                                    "Trabajo por tiempo"}
+                                </strong>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  {formatearDuracion(
+                                    registro.minutos_trabajados
+                                  )}{" "}
+                                  ·{" "}
+                                  {formatearDinero(
+                                    registro.tarifa_hora
+                                  )}{" "}
+                                  por hora
+                                </small>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  Inicio:{" "}
+                                  {formatearFecha(
+                                    registro.fecha_inicio
+                                  )}
+                                </small>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  Fin:{" "}
+                                  {formatearFecha(
+                                    registro.fecha_fin
+                                  )}
+                                </small>
+                              </div>
+
+                              <strong>
+                                {formatearDinero(
+                                  registro.total_pago
+                                )}
+                              </strong>
+                            </div>
+                          )
+                        )}
+                      </>
+                    )}
+
+                    {trabajador
+                      .adeudos.length >
+                      0 && (
+                      <>
+                        <h3>
+                          💳 Adeudos
+                          pendientes
+                        </h3>
+
+                        <div
+                          style={
+                            avisoAdeudo
+                          }
+                        >
+                          Estos adeudos
+                          aparecen solo
+                          como
+                          información.
+                          Todavía no se
+                          descuentan al
+                          cerrar la
+                          nómina.
+                        </div>
+
+                        {trabajador.adeudos.map(
+                          (
+                            registro
+                          ) => (
+                            <div
+                              key={`adeudo-${registro.id}`}
+                              style={
+                                detalleFila
+                              }
+                            >
+                              <div>
+                                <strong>
+                                  {registro.descripcion ||
+                                    "Adeudo"}
+                                </strong>
+
+                                <small
+                                  style={{
+                                    display:
+                                      "block",
+                                  }}
+                                >
+                                  {formatearFecha(
+                                    registro.fecha
+                                  )}
+                                </small>
+                              </div>
+
+                              <strong
+                                style={{
+                                  color:
+                                    "#dc2626",
+                                }}
+                              >
+                                -
+                                {formatearDinero(
+                                  registro.monto
+                                )}
+                              </strong>
+                            </div>
+                          )
+                        )}
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          }
+        )}
       </section>
+            <section style={card}>
+        <h2 style={{ marginTop: 0 }}>
+          🔐 Cierre semanal
+        </h2>
 
-      <section style={card}>
-        <h2>🔒 Cierre semanal</h2>
-
-        <p>
-          Solo se pagarán los bultos entregados y los
-          trabajos por hora finalizados.
+        <p style={{ marginBottom: 6 }}>
+          Solo se pagarán los bultos entregados y los trabajos por hora
+          finalizados.
         </p>
 
-        <div style={avisoPendientes}>
-          Los bultos que no se hayan entregado conservarán
-          su asignación y se pagarán cuando sean terminados.
+        <div style={avisoAmarillo}>
+          Los bultos que no se hayan entregado conservarán su asignación
+          y se pagarán cuando sean terminados.
         </div>
 
-        <div style={avisoInformativoCierre}>
-          Los adeudos aparecen como información, pero en esta
-          etapa todavía no serán descontados al cerrar la
-          semana.
+        <div style={avisoAzul}>
+          Los adeudos aparecen como información, pero en esta etapa
+          todavía no serán descontados al cerrar la semana.
+        </div>
+
+        <div style={cierreResumen}>
+          <div>
+            <small>Nómina bruta a cerrar</small>
+            <strong style={{ fontSize: 24 }}>
+              {formatearDinero(totales.bruto)}
+            </strong>
+          </div>
+
+          <div>
+            <small>Trabajadores con pago</small>
+            <strong style={{ fontSize: 24 }}>
+              {totales.trabajadoresConPago}
+            </strong>
+          </div>
         </div>
 
         <button
+          type="button"
           onClick={cerrarSemana}
-          disabled={
-            cerrando ||
-            nominaPorEmpleado.length === 0
-          }
+          disabled={cerrando || totales.bruto <= 0}
           style={{
-            ...botonCerrar,
+            ...botonCerrarSemana,
             opacity:
-              cerrando ||
-              nominaPorEmpleado.length === 0
-                ? 0.6
+              cerrando || totales.bruto <= 0
+                ? 0.55
                 : 1,
+            cursor:
+              cerrando || totales.bruto <= 0
+                ? "not-allowed"
+                : "pointer",
           }}
         >
           {cerrando
             ? "Cerrando semana..."
-            : `🔒 Cerrar semana por $${totales.bruto.toFixed(
-                2
-              )}`}
+            : "🔐 Cerrar semana y guardar nómina"}
         </button>
       </section>
 
       <section style={card}>
-        <h2>📚 Historial de semanas</h2>
+        <h2 style={{ marginTop: 0 }}>
+          📚 Historial de nóminas
+        </h2>
 
         {historial.length === 0 && (
-          <p>
-            Todavía no hay semanas cerradas.
-          </p>
+          <p>Todavía no hay semanas cerradas.</p>
         )}
 
-        {historial.map((semana) => {
-          const abierta =
-            semanaHistorialAbierta === semana.id;
+        {historial.map((semana) => (
+          <div key={semana.id} style={historialCard}>
+            <div>
+              <strong>
+                Semana del{" "}
+                {formatearSoloFecha(semana.fecha_inicio)}
+              </strong>
 
-          return (
-            <div
-              key={semana.id}
-              style={historialCard}
-            >
-              <button
-                type="button"
-                onClick={() =>
-                  setSemanaHistorialAbierta(
-                    abierta ? null : semana.id
+              <small style={{ display: "block" }}>
+                al{" "}
+                {formatearSoloFecha(
+                  obtenerSabadoDesdeInicio(
+                    semana.fecha_inicio
                   )
-                }
-                style={botonHistorial}
-              >
-                <div style={{ textAlign: "left" }}>
-                  <strong>
-                    Semana del{" "}
-                    {formatearSoloFecha(
-                      semana.fecha_inicio
-                    )}
-                  </strong>
+                )}
+              </small>
 
-                  <small style={{ display: "block" }}>
-                    Cerrada:{" "}
-                    {formatearFecha(
-                      semana.fecha_cierre
-                    )}
-                  </small>
-                </div>
-
-                <div style={{ textAlign: "right" }}>
-                  <strong style={{ fontSize: 18 }}>
-                    $
-                    {Number(
-                      semana.total_nomina || 0
-                    ).toFixed(2)}
-                  </strong>
-
-                  <small style={{ display: "block" }}>
-                    {semana.nomina_semanal_detalle
-                      ?.length || 0}{" "}
-                    trabajadores
-                  </small>
-                </div>
-              </button>
-
-              {abierta && (
-                <div style={{ padding: 15 }}>
-                  {(
-                    semana.nomina_semanal_detalle ||
-                    []
-                  ).map((detalle) => {
-                    const bruto =
-                      Number(detalle.pago_bruto || 0) ||
-                      Number(detalle.total_pago || 0);
-
-                    const descuento = Number(
-                      detalle.descuento_adeudo || 0
-                    );
-
-                    const neto =
-                      Number(detalle.total_neto || 0) ||
-                      Number(detalle.total_pago || 0);
-
-                    return (
-                      <div
-                        key={detalle.id}
-                        style={filaHistorial}
-                      >
-                        <div>
-                          <strong>
-                            {detalle.empleados?.alias ||
-                              detalle.empleados
-                                ?.nombre}
-                          </strong>
-
-                          <small
-                            style={{
-                              display: "block",
-                            }}
-                          >
-                            {detalle.empleados?.puesto ||
-                              "Sin puesto"}
-                          </small>
-                        </div>
-
-                        <div
-                          style={{ textAlign: "right" }}
-                        >
-                          <small>
-                            Pasos: $
-                            {Number(
-                              detalle.pago_pieza ||
-                                0
-                            ).toFixed(2)}
-                          </small>
-
-                          <small
-                            style={{
-                              display: "block",
-                            }}
-                          >
-                            Horas: $
-                            {Number(
-                              detalle.pago_hora ||
-                                0
-                            ).toFixed(2)}
-                          </small>
-
-                          <small
-                            style={{
-                              display: "block",
-                            }}
-                          >
-                            Bruto: $
-                            {bruto.toFixed(2)}
-                          </small>
-
-                          {descuento > 0 && (
-                            <small
-                              style={{
-                                display: "block",
-                                color: "#b91c1c",
-                              }}
-                            >
-                              Descuento: -$
-                              {descuento.toFixed(2)}
-                            </small>
-                          )}
-
-                          <strong>
-                            Neto: ${neto.toFixed(2)}
-                          </strong>
-                        </div>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
+              <small style={{ display: "block" }}>
+                Cerrada:{" "}
+                {formatearFecha(semana.fecha_cierre)}
+              </small>
             </div>
-          );
-        })}
+
+            <div style={{ textAlign: "right" }}>
+              <small style={{ display: "block" }}>
+                Estado: {semana.estado}
+              </small>
+
+              <strong>
+                {formatearDinero(semana.total_nomina)}
+              </strong>
+            </div>
+          </div>
+        ))}
       </section>
     </div>
   );
 }
+
+/* =========================================================
+   ESTILOS
+========================================================= */
+
+const encabezadoPagina = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  gap: 15,
+  flexWrap: "wrap",
+  marginBottom: 20,
+};
+
+const botonActualizar = {
+  padding: "10px 14px",
+  border: "none",
+  borderRadius: 8,
+  background: "#2563eb",
+  color: "white",
+  fontWeight: "bold",
+  cursor: "pointer",
+};
 
 const card = {
   background: "white",
@@ -1220,15 +1671,15 @@ const encabezadoSemana = {
   flexWrap: "wrap",
 };
 
-const estadoAbierto = {
+const etiquetaAbierta = {
   background: "#dcfce7",
   color: "#166534",
-  padding: "10px 14px",
+  padding: "10px 16px",
   borderRadius: 999,
   fontWeight: "bold",
 };
 
-const resumenGeneral = {
+const resumenGrid = {
   display: "grid",
   gridTemplateColumns:
     "repeat(auto-fit, minmax(180px, 1fr))",
@@ -1242,85 +1693,111 @@ const tarjetaResumen = {
   borderRadius: 12,
   boxShadow: "0 2px 8px rgba(0,0,0,0.08)",
   display: "grid",
-  gap: 6,
+  gap: 8,
 };
 
-const tarjetaResumenAdeudo = {
+const tarjetaAdeudo = {
   ...tarjetaResumen,
   background: "#fef3c7",
   color: "#92400e",
 };
 
-const tarjetaResumenDestacada = {
+const tarjetaNeto = {
   ...tarjetaResumen,
   background: "#166534",
   color: "white",
 };
 
-const avisoInformativo = {
+const avisoAzul = {
   background: "#dbeafe",
-  color: "#1e3a8a",
+  color: "#1e40af",
   padding: 14,
   borderRadius: 10,
   marginBottom: 20,
 };
 
-const empleadoCard = {
+const avisoAmarillo = {
+  background: "#fef3c7",
+  color: "#92400e",
+  padding: 14,
+  borderRadius: 10,
+  marginBottom: 14,
+};
+
+const avisoAdeudo = {
+  background: "#fee2e2",
+  color: "#991b1b",
+  padding: 12,
+  borderRadius: 8,
+  marginBottom: 12,
+};
+
+const estadoVacio = {
+  display: "grid",
+  gap: 7,
+  textAlign: "center",
+  background: "#f3f4f6",
+  padding: 24,
+  borderRadius: 10,
+};
+
+const trabajadorCard = {
   border: "1px solid #e5e7eb",
   borderRadius: 12,
   marginBottom: 12,
   overflow: "hidden",
 };
 
-const botonEmpleado = {
+const trabajadorResumen = {
   width: "100%",
-  padding: 15,
-  background: "#f9fafb",
   border: "none",
-  cursor: "pointer",
+  background: "#f9fafb",
+  padding: 16,
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
   gap: 15,
-  flexWrap: "wrap",
-};
-
-const totalesEmpleado = {
-  display: "flex",
-  gap: 10,
-  alignItems: "center",
-  flexWrap: "wrap",
-};
-
-const totalBrutoEmpleado = {
-  background: "#e5e7eb",
+  cursor: "pointer",
   color: "#111827",
-  padding: "8px 12px",
+};
+
+const totalesTrabajador = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "flex-end",
+  gap: 10,
+  flexWrap: "wrap",
+};
+
+const etiquetaBruto = {
+  background: "#e5e7eb",
+  padding: "8px 10px",
   borderRadius: 8,
   fontWeight: "bold",
 };
 
-const adeudoEmpleado = {
+const etiquetaAdeudo = {
   background: "#fee2e2",
-  color: "#b91c1c",
-  padding: "8px 12px",
+  color: "#dc2626",
+  padding: "8px 10px",
   borderRadius: 8,
   fontWeight: "bold",
 };
 
-const netoEmpleado = {
+const etiquetaNeto = {
   background: "#dcfce7",
   color: "#166534",
-  padding: "8px 12px",
+  padding: "8px 10px",
   borderRadius: 8,
   fontWeight: "bold",
 };
 
-const detalleEmpleado = {
-  padding: 15,
+const detalleTrabajador = {
+  padding: 16,
+  background: "white",
 };
 
-const metricasEmpleado = {
+const miniResumenGrid = {
   display: "grid",
   gridTemplateColumns:
     "repeat(auto-fit, minmax(160px, 1fr))",
@@ -1328,100 +1805,59 @@ const metricasEmpleado = {
   marginBottom: 20,
 };
 
-const metricaCaja = {
+const miniTarjeta = {
   display: "grid",
-  gap: 5,
-  background: "#f9fafb",
-  border: "1px solid #e5e7eb",
-  padding: 12,
+  gap: 6,
+  padding: 14,
   borderRadius: 10,
-};
-
-const tabla = {
-  width: "100%",
-  borderCollapse: "collapse",
-  marginBottom: 20,
-};
-
-const th = {
-  padding: 10,
-  textAlign: "left",
-  borderBottom: "2px solid #e5e7eb",
-  whiteSpace: "nowrap",
-};
-
-const td = {
-  padding: 10,
-  borderBottom: "1px solid #e5e7eb",
-  whiteSpace: "nowrap",
-};
-
-const avisoPendientes = {
-  background: "#fef3c7",
-  color: "#92400e",
-  padding: 12,
-  borderRadius: 10,
-  marginBottom: 15,
-};
-
-const avisoInformativoCierre = {
-  background: "#dbeafe",
-  color: "#1e3a8a",
-  padding: 12,
-  borderRadius: 10,
-  marginBottom: 15,
-};
-
-const botonCerrar = {
-  padding: "14px 20px",
-  background: "#dc2626",
-  color: "white",
-  border: "none",
-  borderRadius: 10,
-  fontWeight: "bold",
-  cursor: "pointer",
-  fontSize: 16,
-};
-
-const alerta = {
-  background: "#dcfce7",
-  color: "#166534",
-  padding: 12,
-  borderRadius: 10,
-  marginBottom: 15,
-  fontWeight: "bold",
-};
-
-const sinRegistros = {
   background: "#f3f4f6",
-  padding: 20,
-  borderRadius: 10,
-  textAlign: "center",
 };
 
-const historialCard = {
-  border: "1px solid #e5e7eb",
-  borderRadius: 10,
-  marginBottom: 10,
-  overflow: "hidden",
-};
-
-const botonHistorial = {
-  width: "100%",
-  padding: 15,
-  background: "#f9fafb",
-  border: "none",
-  cursor: "pointer",
+const detalleFila = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
   gap: 15,
+  padding: "13px 0",
+  borderBottom: "1px solid #eee",
 };
 
-const filaHistorial = {
-  padding: 12,
-  borderBottom: "1px solid #eee",
+const cierreResumen = {
+  display: "grid",
+  gridTemplateColumns:
+    "repeat(auto-fit, minmax(220px, 1fr))",
+  gap: 15,
+  marginTop: 20,
+  marginBottom: 20,
+};
+
+const botonCerrarSemana = {
+  width: "100%",
+  padding: 15,
+  border: "none",
+  borderRadius: 10,
+  background: "#166534",
+  color: "white",
+  fontWeight: "bold",
+  fontSize: 16,
+};
+
+const historialCard = {
   display: "flex",
   justifyContent: "space-between",
+  alignItems: "center",
   gap: 15,
+  padding: 14,
+  marginBottom: 10,
+  border: "1px solid #e5e7eb",
+  borderRadius: 10,
+};
+
+const mensajeExito = {
+  background: "#dcfce7",
+  color: "#166534",
+  padding: 14,
+  borderRadius: 10,
+  marginBottom: 20,
+  fontWeight: "bold",
 };
