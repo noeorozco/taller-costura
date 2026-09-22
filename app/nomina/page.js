@@ -271,7 +271,10 @@ export default function NominaPage() {
   }
 
   async function cargarAdeudosPendientes() {
-    const { data, error } = await supabase
+  // 1. Cargamos los préstamos SIN intentar relacionarlos
+  // automáticamente con empleados.
+  const { data: prestamosData, error: prestamosError } =
+    await supabase
       .from("prestamos")
       .select(`
         id,
@@ -279,25 +282,77 @@ export default function NominaPage() {
         monto,
         fecha,
         descripcion,
-        estado,
-        empleados(
+        estado
+      `)
+      .eq("estado", "Pendiente")
+      .order("fecha", { ascending: false });
+
+  if (prestamosError) {
+    console.error(
+      "Error cargando préstamos:",
+      prestamosError
+    );
+    throw prestamosError;
+  }
+
+  // Si no hay préstamos pendientes, terminamos aquí.
+  if (!prestamosData || prestamosData.length === 0) {
+    setAdeudosPendientes([]);
+    return;
+  }
+
+  // 2. Obtenemos los IDs de los empleados relacionados.
+  const empleadosIds = [
+    ...new Set(
+      prestamosData
+        .map((prestamo) => prestamo.empleado_id)
+        .filter(Boolean)
+    ),
+  ];
+
+  // 3. Cargamos los empleados por separado.
+  let empleadosData = [];
+
+  if (empleadosIds.length > 0) {
+    const { data, error: empleadosError } =
+      await supabase
+        .from("empleados")
+        .select(`
           id,
           nombre,
           alias,
           puesto
-        )
-      `)
-      .eq("estado", "Pendiente")
-      .order("fecha", {
-        ascending: true,
-      });
+        `)
+        .in("id", empleadosIds);
 
-    if (error) {
-      throw error;
+    if (empleadosError) {
+      console.error(
+        "Error cargando empleados de préstamos:",
+        empleadosError
+      );
+      throw empleadosError;
     }
 
-    setAdeudos(data || []);
+    empleadosData = data || [];
   }
+
+  // 4. Unimos los datos manualmente.
+  const prestamosConEmpleado = prestamosData.map(
+    (prestamo) => {
+      const empleado = empleadosData.find(
+        (emp) =>
+          String(emp.id) === String(prestamo.empleado_id)
+      );
+
+      return {
+        ...prestamo,
+        empleados: empleado || null,
+      };
+    }
+  );
+
+  setAdeudosPendientes(prestamosConEmpleado);
+}
 
   async function cargarHistorial() {
     const { data, error } = await supabase
