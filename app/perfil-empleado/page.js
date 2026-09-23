@@ -14,6 +14,17 @@ export default function PerfilEmpleadoPage() {
   const [trabajosTiempoActivos, setTrabajosTiempoActivos] = useState([]);
   const [prestamos, setPrestamos] = useState([]);
   const [historialSemanas, setHistorialSemanas] = useState([]);
+    // AJUSTES MANUALES DE NÓMINA
+  const [ajustesNomina, setAjustesNomina] = useState([]);
+  const [mostrarFormularioAjuste, setMostrarFormularioAjuste] =
+    useState(false);
+  const [tipoAjuste, setTipoAjuste] = useState("Suma");
+  const [montoAjuste, setMontoAjuste] = useState("");
+  const [conceptoAjuste, setConceptoAjuste] = useState("");
+  const [motivoAjuste, setMotivoAjuste] = useState("");
+  const [guardandoAjuste, setGuardandoAjuste] = useState(false);
+  const [procesandoExclusion, setProcesandoExclusion] =
+    useState(null);
 
   const [semanaAbierta, setSemanaAbierta] = useState(null);
   const [cargando, setCargando] = useState(false);
@@ -79,6 +90,12 @@ export default function PerfilEmpleadoPage() {
     setTrabajosTiempoActivos([]);
     setPrestamos([]);
     setHistorialSemanas([]);
+        setAjustesNomina([]);
+    setMostrarFormularioAjuste(false);
+    setTipoAjuste("Suma");
+    setMontoAjuste("");
+    setConceptoAjuste("");
+    setMotivoAjuste("");
 
     setMostrarFormularioTiempo(false);
     limpiarFormularioTiempo();
@@ -90,7 +107,7 @@ export default function PerfilEmpleadoPage() {
     try {
       const empleadoNumerico = Number(id);
 
-      const [
+           const [
         respuestaEmpleado,
         respuestaAsignacionesTerminadas,
         respuestaAsignacionesPendientes,
@@ -98,6 +115,7 @@ export default function PerfilEmpleadoPage() {
         respuestaTiempoActivo,
         respuestaPrestamos,
         respuestaHistorial,
+        respuestaAjustes,
       ] = await Promise.all([
         supabase
           .from("empleados")
@@ -111,8 +129,11 @@ export default function PerfilEmpleadoPage() {
             id,
             fecha_terminado,
             empleado_id,
-            semana_nomina_id,
+                      semana_nomina_id,
             estado,
+            excluir_nomina,
+            motivo_exclusion_nomina,
+            fecha_exclusion_nomina,
             modelo_procesos(id,nombre,costo),
             orden_bultos_v2(id,nombre_bulto,talla,cantidad),
             ordenes(
@@ -212,9 +233,14 @@ export default function PerfilEmpleadoPage() {
           .eq("empleado_id", empleadoNumerico)
           .order("id", { ascending: false })
           .limit(12),
+                  supabase
+          .from("ajustes_nomina")
+          .select("*")
+          .eq("empleado_id", empleadoNumerico)
+          .order("fecha", { ascending: false }),
       ]);
 
-      const respuestas = [
+            const respuestas = [
         respuestaEmpleado,
         respuestaAsignacionesTerminadas,
         respuestaAsignacionesPendientes,
@@ -222,6 +248,7 @@ export default function PerfilEmpleadoPage() {
         respuestaTiempoActivo,
         respuestaPrestamos,
         respuestaHistorial,
+        respuestaAjustes,
       ];
 
       const respuestaConError = respuestas.find(
@@ -252,6 +279,7 @@ export default function PerfilEmpleadoPage() {
 
       setPrestamos(respuestaPrestamos.data || []);
       setHistorialSemanas(respuestaHistorial.data || []);
+            setAjustesNomina(respuestaAjustes.data || []);
     } catch (error) {
       alert(error.message || "No se pudo cargar el perfil");
     } finally {
@@ -265,6 +293,168 @@ export default function PerfilEmpleadoPage() {
     setHoraFinManual("");
     setDescripcionManual("");
     setTarifaManual("");
+  }
+
+    async function guardarAjusteNomina(e) {
+    e.preventDefault();
+
+    if (!empleadoId || !semanaAbierta) {
+      alert("No hay trabajador o semana abierta.");
+      return;
+    }
+
+    const monto = Number(montoAjuste);
+
+    if (!Number.isFinite(monto) || monto <= 0) {
+      alert("Escribe un monto válido mayor a cero.");
+      return;
+    }
+
+    if (!conceptoAjuste.trim()) {
+      alert("Escribe el concepto del ajuste.");
+      return;
+    }
+
+    if (!motivoAjuste.trim()) {
+      alert("Escribe el motivo del ajuste.");
+      return;
+    }
+
+    const signo = tipoAjuste === "Suma" ? "+" : "-";
+
+    const confirmar = window.confirm(
+      `Se aplicará un ajuste de ${signo}${formatearDinero(
+        monto
+      )} a ${empleado.alias || empleado.nombre}.\n\nConcepto: ${
+        conceptoAjuste
+      }\nMotivo: ${motivoAjuste}\n\n¿Continuar?`
+    );
+
+    if (!confirmar) return;
+
+    setGuardandoAjuste(true);
+
+    try {
+      const { error } = await supabase
+        .from("ajustes_nomina")
+        .insert({
+          empleado_id: Number(empleadoId),
+          semana_id: semanaAbierta.id,
+          tipo: tipoAjuste,
+          monto,
+          concepto: conceptoAjuste.trim(),
+          motivo: motivoAjuste.trim(),
+        });
+
+      if (error) throw error;
+
+      setTipoAjuste("Suma");
+      setMontoAjuste("");
+      setConceptoAjuste("");
+      setMotivoAjuste("");
+      setMostrarFormularioAjuste(false);
+
+      await cargarPerfil(empleadoId);
+
+      alert("Ajuste registrado correctamente.");
+    } catch (error) {
+      console.error(error);
+      alert(
+        error.message ||
+          "No se pudo registrar el ajuste de nómina."
+      );
+    } finally {
+      setGuardandoAjuste(false);
+    }
+  }
+
+  async function excluirPasoNomina(registro) {
+    const pago = calcularPagoPaso(registro);
+
+    const motivo = window.prompt(
+      `Este paso dejará de contar en la nómina de ${
+        empleado.alias || empleado.nombre
+      }.\n\nPaso: ${
+        registro.modelo_procesos?.nombre || "Sin nombre"
+      }\nMonto: ${formatearDinero(
+        pago
+      )}\n\nEscribe el motivo de la corrección:`
+    );
+
+    if (motivo === null) return;
+
+    if (!motivo.trim()) {
+      alert("Debes escribir el motivo de la corrección.");
+      return;
+    }
+
+    const confirmar = window.confirm(
+      `¿Seguro que quieres quitar este paso de la nómina?\n\n${
+        registro.modelo_procesos?.nombre || "Paso"
+      }\n${formatearDinero(
+        pago
+      )}\n\nEl trabajo NO se borrará de producción.`
+    );
+
+    if (!confirmar) return;
+
+    setProcesandoExclusion(registro.id);
+
+    try {
+      const { error } = await supabase
+        .from("asignaciones")
+        .update({
+          excluir_nomina: true,
+          motivo_exclusion_nomina: motivo.trim(),
+          fecha_exclusion_nomina: new Date().toISOString(),
+        })
+        .eq("id", registro.id);
+
+      if (error) throw error;
+
+      await cargarPerfil(empleadoId);
+
+      alert(
+        "Paso quitado de la nómina correctamente. El registro de producción se conservó."
+      );
+    } catch (error) {
+      console.error(error);
+      alert(
+        error.message ||
+          "No se pudo quitar el paso de la nómina."
+      );
+    } finally {
+      setProcesandoExclusion(null);
+    }
+  }
+
+  async function eliminarAjusteNomina(ajuste) {
+    const signo = ajuste.tipo === "Suma" ? "+" : "-";
+
+    const confirmar = window.confirm(
+      `¿Eliminar este ajuste?\n\n${ajuste.concepto}\n${signo}${formatearDinero(
+        ajuste.monto
+      )}\n\nEl total de la semana se recalculará.`
+    );
+
+    if (!confirmar) return;
+
+    try {
+      const { error } = await supabase
+        .from("ajustes_nomina")
+        .delete()
+        .eq("id", ajuste.id);
+
+      if (error) throw error;
+
+      await cargarPerfil(empleadoId);
+    } catch (error) {
+      console.error(error);
+      alert(
+        error.message ||
+          "No se pudo eliminar el ajuste."
+      );
+    }
   }
 
   function calcularPagoPaso(asignacion) {
@@ -475,11 +665,11 @@ export default function PerfilEmpleadoPage() {
   }
 
   const resumen = useMemo(() => {
-    const pasosSemana = asignacionesTerminadas.filter(
-      (registro) =>
-        estaEnSemanaActual(registro.fecha_terminado)
-    );
-
+          const pasosSemana = asignacionesTerminadas.filter(
+        (registro) =>
+          estaEnSemanaActual(registro.fecha_terminado) &&
+          registro.excluir_nomina !== true
+      );
     const horasSemana = trabajosTiempo.filter(
       (registro) =>
         estaEnSemanaActual(registro.fecha_fin)
@@ -528,6 +718,22 @@ export default function PerfilEmpleadoPage() {
       0
     );
 
+        const ajustesSemana = ajustesNomina.filter(
+      (ajuste) =>
+        Number(ajuste.semana_id) === Number(semanaAbierta?.id)
+    );
+
+    const totalAjustesSemana = ajustesSemana.reduce(
+      (total, ajuste) => {
+        const monto = Number(ajuste.monto || 0);
+
+        return ajuste.tipo === "Resta"
+          ? total - monto
+          : total + monto;
+      },
+      0
+    );
+
     return {
       pasosSemana,
       horasSemana,
@@ -538,12 +744,21 @@ export default function PerfilEmpleadoPage() {
       pagoPasosHoy,
       pagoHorasHoy,
       totalHoy: pagoPasosHoy + pagoHorasHoy,
-      totalBrutoSemana:
+            ajustesSemana,
+      totalAjustesSemana,
+
+      totalBrutoAntesAjustes:
         pagoPasosSemana + pagoHorasSemana,
-      totalPrestamosSemana,
-      netoEstimado:
+
+      totalBrutoSemana:
         pagoPasosSemana +
-        pagoHorasSemana -
+        pagoHorasSemana +
+        totalAjustesSemana,
+      totalPrestamosSemana,
+            netoEstimado:
+        pagoPasosSemana +
+        pagoHorasSemana +
+        totalAjustesSemana -
         totalPrestamosSemana,
       bultosTerminadosSemana: pasosSemana.length,
       minutosSemana: horasSemana.reduce(
@@ -553,10 +768,11 @@ export default function PerfilEmpleadoPage() {
         0
       ),
     };
-  }, [
+    }, [
     asignacionesTerminadas,
     trabajosTiempo,
     prestamos,
+    ajustesNomina,
     semanaAbierta,
   ]);
 
@@ -949,6 +1165,217 @@ export default function PerfilEmpleadoPage() {
             )}
           </section>
 
+                      <section style={card}>
+              <div style={encabezadoAccion}>
+                <div>
+                  <h2 style={{ margin: 0 }}>
+                    ⚙️ Ajustes de nómina
+                  </h2>
+
+                  <p
+                    style={{
+                      marginBottom: 0,
+                      color: "#6b7280",
+                    }}
+                  >
+                    Agrega pagos faltantes, bonos o correcciones
+                    manuales sin modificar la producción.
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() =>
+                    setMostrarFormularioAjuste(
+                      !mostrarFormularioAjuste
+                    )
+                  }
+                  style={botonAgregarTiempo}
+                >
+                  {mostrarFormularioAjuste
+                    ? "✕ Cancelar"
+                    : "➕ Agregar ajuste"}
+                </button>
+              </div>
+
+              {mostrarFormularioAjuste && (
+                <form
+                  onSubmit={guardarAjusteNomina}
+                  style={formularioTiempo}
+                >
+                  <div style={campoFormulario}>
+                    <label style={etiqueta}>
+                      Tipo de ajuste
+                    </label>
+
+                    <select
+                      value={tipoAjuste}
+                      onChange={(e) =>
+                        setTipoAjuste(e.target.value)
+                      }
+                      style={input}
+                    >
+                      <option value="Suma">
+                        ➕ Sumar dinero
+                      </option>
+                      <option value="Resta">
+                        ➖ Restar dinero
+                      </option>
+                    </select>
+                  </div>
+
+                  <div style={campoFormulario}>
+                    <label style={etiqueta}>
+                      Monto
+                    </label>
+
+                    <input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      placeholder="Ej. 250"
+                      value={montoAjuste}
+                      onChange={(e) =>
+                        setMontoAjuste(e.target.value)
+                      }
+                      style={input}
+                      required
+                    />
+                  </div>
+
+                  <div style={campoDescripcion}>
+                    <label style={etiqueta}>
+                      Concepto
+                    </label>
+
+                    <input
+                      type="text"
+                      placeholder="Ej. Paso faltante, bono, corrección..."
+                      value={conceptoAjuste}
+                      onChange={(e) =>
+                        setConceptoAjuste(e.target.value)
+                      }
+                      style={input}
+                      required
+                    />
+                  </div>
+
+                  <div style={campoDescripcion}>
+                    <label style={etiqueta}>
+                      Motivo
+                    </label>
+
+                    <input
+                      type="text"
+                      placeholder="Ej. No se registró el paso al entregar el bulto"
+                      value={motivoAjuste}
+                      onChange={(e) =>
+                        setMotivoAjuste(e.target.value)
+                      }
+                      style={input}
+                      required
+                    />
+                  </div>
+
+                  <button
+                    type="submit"
+                    disabled={guardandoAjuste}
+                    style={{
+                      ...botonGuardarTiempo,
+                      opacity: guardandoAjuste ? 0.6 : 1,
+                    }}
+                  >
+                    {guardandoAjuste
+                      ? "Guardando..."
+                      : tipoAjuste === "Suma"
+                      ? "💾 Agregar a nómina"
+                      : "💾 Restar de nómina"}
+                  </button>
+                </form>
+              )}
+
+              {resumen.ajustesSemana.length > 0 && (
+                <div style={{ marginTop: 20 }}>
+                  <h3>Ajustes de esta semana</h3>
+
+                  {resumen.ajustesSemana.map((ajuste) => (
+                    <div
+                      key={ajuste.id}
+                      style={detalleCard}
+                    >
+                      <div>
+                        <strong>
+                          {ajuste.tipo === "Suma"
+                            ? "➕ "
+                            : "➖ "}
+                          {ajuste.concepto}
+                        </strong>
+
+                        <small
+                          style={{
+                            display: "block",
+                            marginTop: 4,
+                          }}
+                        >
+                          {ajuste.motivo}
+                        </small>
+
+                        <small
+                          style={{ display: "block" }}
+                        >
+                          {formatearFecha(ajuste.fecha)}
+                        </small>
+                      </div>
+
+                      <div
+                        style={{
+                          display: "grid",
+                          gap: 7,
+                          justifyItems: "end",
+                        }}
+                      >
+                        <strong
+                          style={{
+                            color:
+                              ajuste.tipo === "Suma"
+                                ? "#166534"
+                                : "#991b1b",
+                          }}
+                        >
+                          {ajuste.tipo === "Suma"
+                            ? "+"
+                            : "-"}
+                          {formatearDinero(
+                            ajuste.monto
+                          )}
+                        </strong>
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            eliminarAjusteNomina(
+                              ajuste
+                            )
+                          }
+                          style={{
+                            border: "none",
+                            borderRadius: 7,
+                            padding: "6px 9px",
+                            background: "#fee2e2",
+                            color: "#991b1b",
+                            fontWeight: "bold",
+                            cursor: "pointer",
+                          }}
+                        >
+                          🗑 Eliminar ajuste
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </section>
+
           <h2>Resumen en tiempo real</h2>
 
           <section style={resumenGrid}>
@@ -1009,6 +1436,32 @@ export default function PerfilEmpleadoPage() {
                 {formatearDuracion(
                   resumen.minutosSemana
                 )}
+              </span>
+            </div>
+
+                        <div style={tarjetaResumen}>
+              <small>
+                Ajustes de nómina esta semana
+              </small>
+
+              <strong
+                style={{
+                  color:
+                    resumen.totalAjustesSemana >= 0
+                      ? "#166534"
+                      : "#991b1b",
+                }}
+              >
+                {resumen.totalAjustesSemana > 0
+                  ? "+"
+                  : ""}
+                {formatearDinero(
+                  resumen.totalAjustesSemana
+                )}
+              </strong>
+
+              <span>
+                {resumen.ajustesSemana.length} ajuste(s)
               </span>
             </div>
 
@@ -1268,23 +1721,28 @@ export default function PerfilEmpleadoPage() {
                 </h2>
 
                 {resumen.pasosHoy.map(
-                  (registro) => (
-                    <DetallePaso
-                      key={`paso-${registro.id}`}
-                      registro={registro}
-                      calcularPagoPaso={
-                        calcularPagoPaso
-                      }
-                      formatearDinero={
-                        formatearDinero
-                      }
-                      formatearFecha={
-                        formatearFecha
-                      }
-                    />
-                  )
-                )}
-
+  (registro) => (
+    <DetallePaso
+      key={`paso-${registro.id}`}
+      registro={registro}
+      calcularPagoPaso={
+        calcularPagoPaso
+      }
+      formatearDinero={
+        formatearDinero
+      }
+      formatearFecha={
+        formatearFecha
+      }
+      excluirPasoNomina={
+        excluirPasoNomina
+      }
+      procesandoExclusion={
+        procesandoExclusion
+      }
+    />
+  )
+)}
                 {resumen.horasHoy.map(
                   (registro) => (
                     <DetalleHora
@@ -1325,21 +1783,27 @@ export default function PerfilEmpleadoPage() {
 
                 {resumen.pasosSemana.map(
                   (registro) => (
-                    <DetallePaso
-                      key={`paso-${registro.id}`}
-                      registro={registro}
-                      calcularPagoPaso={
-                        calcularPagoPaso
-                      }
-                      formatearDinero={
-                        formatearDinero
-                      }
-                      formatearFecha={
-                        formatearFecha
-                      }
-                    />
-                  )
-                )}
+  <DetallePaso
+    key={`paso-${registro.id}`}
+    registro={registro}
+    calcularPagoPaso={
+      calcularPagoPaso
+    }
+    formatearDinero={
+      formatearDinero
+    }
+    formatearFecha={
+      formatearFecha
+    }
+    excluirPasoNomina={
+      excluirPasoNomina
+    }
+    procesandoExclusion={
+      procesandoExclusion
+    }
+  />
+)
+)}
 
                 {resumen.horasSemana.map(
                   (registro) => (
@@ -1466,6 +1930,8 @@ function DetallePaso({
   calcularPagoPaso,
   formatearDinero,
   formatearFecha,
+  excluirPasoNomina,
+  procesandoExclusion,
 }) {
   return (
     <div style={detalleCard}>
@@ -1503,11 +1969,41 @@ function DetallePaso({
         </small>
       </div>
 
-      <strong>
-        {formatearDinero(
-          calcularPagoPaso(registro)
-        )}
-      </strong>
+            <div
+        style={{
+          display: "grid",
+          gap: 8,
+          justifyItems: "end",
+        }}
+      >
+        <strong>
+          {formatearDinero(
+            calcularPagoPaso(registro)
+          )}
+        </strong>
+
+        <button
+          type="button"
+          onClick={() => excluirPasoNomina(registro)}
+          disabled={procesandoExclusion === registro.id}
+          style={{
+            border: "none",
+            borderRadius: 7,
+            padding: "7px 10px",
+            background: "#fee2e2",
+            color: "#991b1b",
+            fontWeight: "bold",
+            cursor:
+              procesandoExclusion === registro.id
+                ? "not-allowed"
+                : "pointer",
+          }}
+        >
+          {procesandoExclusion === registro.id
+            ? "Quitando..."
+            : "🗑 Quitar de nómina"}
+        </button>
+      </div>
     </div>
   );
 }
