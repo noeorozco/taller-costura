@@ -737,228 +737,460 @@ export default function NominaPage() {
         ).length,
     };
   }, [detalleTrabajadores]);
-    async function cerrarSemana() {
-    if (!semanaAbierta) {
-      alert("No hay una semana abierta.");
+async function cerrarSemana() {
+  if (!semanaAbierta) {
+    alert("No hay una semana abierta.");
+    return;
+  }
+
+  if (cerrando) {
+    return;
+  }
+
+  const confirmar = window.confirm(
+    "¿Cerrar la semana?\n\n" +
+      "Antes de cerrar se volverán a revisar en Supabase " +
+      "todos los trabajos terminados de esta semana que todavía no tengan nómina."
+  );
+
+  if (!confirmar) {
+    return;
+  }
+
+  setCerrando(true);
+
+  try {
+    /*
+      =====================================================
+      1. DEFINIMOS EL PERIODO EXACTO DE LA SEMANA
+      =====================================================
+    */
+
+    const inicio =
+      convertirFechaLocal(
+        semanaAbierta.fecha_inicio
+      );
+
+    inicio.setHours(0, 0, 0, 0);
+
+    const fin =
+      obtenerSabadoDesdeInicio(
+        semanaAbierta.fecha_inicio
+      );
+
+    /*
+      =====================================================
+      2. VOLVEMOS A CONSULTAR LAS ASIGNACIONES DIRECTAMENTE
+         EN SUPABASE.
+
+      Esto evita depender únicamente de lo que estaba
+      cargado anteriormente en la pantalla.
+      =====================================================
+    */
+
+    const {
+      data: asignacionesActuales,
+      error: errorAsignacionesConsulta,
+    } = await supabase
+      .from("asignaciones")
+      .select(`
+        id,
+        empleado_id,
+        orden_bulto_id,
+        proceso_id,
+        fecha_terminado,
+        semana_nomina_id,
+        modelo_procesos(
+          id,
+          nombre,
+          costo
+        ),
+        orden_bultos_v2(
+          id,
+          cantidad
+        )
+      `)
+      .eq("estado", "Terminado")
+      .is("semana_nomina_id", null)
+      .gte(
+        "fecha_terminado",
+        inicio.toISOString()
+      )
+      .lte(
+        "fecha_terminado",
+        fin.toISOString()
+      );
+
+    if (errorAsignacionesConsulta) {
+      throw errorAsignacionesConsulta;
+    }
+
+    /*
+      =====================================================
+      3. VOLVEMOS A CONSULTAR LOS TRABAJOS POR HORA
+         DIRECTAMENTE EN SUPABASE.
+      =====================================================
+    */
+
+    const {
+      data: trabajosTiempoActuales,
+      error: errorTiempoConsulta,
+    } = await supabase
+      .from("trabajos_tiempo")
+      .select(`
+        id,
+        empleado_id,
+        fecha_inicio,
+        fecha_fin,
+        minutos_trabajados,
+        total_pago,
+        estado,
+        semana_id
+      `)
+      .eq("estado", "Terminado")
+      .is("semana_id", null)
+      .gte(
+        "fecha_fin",
+        inicio.toISOString()
+      )
+      .lte(
+        "fecha_fin",
+        fin.toISOString()
+      );
+
+    if (errorTiempoConsulta) {
+      throw errorTiempoConsulta;
+    }
+
+    /*
+      =====================================================
+      4. RECALCULAMOS LA NÓMINA DESDE LOS DATOS REALES
+         QUE ACABAMOS DE LEER DE SUPABASE.
+      =====================================================
+    */
+
+    const mapaTrabajadores =
+      new Map();
+
+    function obtenerTrabajador(
+      empleadoId
+    ) {
+      const id =
+        Number(empleadoId);
+
+      if (!mapaTrabajadores.has(id)) {
+        mapaTrabajadores.set(id, {
+          empleadoId: id,
+          pagoPasos: 0,
+          pagoHoras: 0,
+          bruto: 0,
+        });
+      }
+
+      return mapaTrabajadores.get(id);
+    }
+
+    (
+      asignacionesActuales || []
+    ).forEach((registro) => {
+      const trabajador =
+        obtenerTrabajador(
+          registro.empleado_id
+        );
+
+      const cantidad =
+        Number(
+          registro
+            .orden_bultos_v2
+            ?.cantidad || 0
+        );
+
+      const costo =
+        Number(
+          registro
+            .modelo_procesos
+            ?.costo || 0
+        );
+
+      const pago =
+        cantidad * costo;
+
+      trabajador.pagoPasos +=
+        pago;
+
+      trabajador.bruto +=
+        pago;
+    });
+
+    (
+      trabajosTiempoActuales || []
+    ).forEach((registro) => {
+      const trabajador =
+        obtenerTrabajador(
+          registro.empleado_id
+        );
+
+      const pago =
+        Number(
+          registro.total_pago || 0
+        );
+
+      trabajador.pagoHoras +=
+        pago;
+
+      trabajador.bruto +=
+        pago;
+    });
+
+    const trabajadoresFinales =
+      [...mapaTrabajadores.values()]
+        .filter(
+          (trabajador) =>
+            trabajador.bruto > 0
+        );
+
+    if (
+      trabajadoresFinales.length === 0
+    ) {
+      alert(
+        "No hay trabajos terminados pendientes de pago dentro de esta semana."
+      );
+
       return;
     }
 
-    if (cerrando) {
+    /*
+      =====================================================
+      5. CALCULAMOS EL TOTAL FINAL
+      =====================================================
+    */
+
+    const totalFinal =
+      trabajadoresFinales.reduce(
+        (total, trabajador) =>
+          total +
+          Number(
+            trabajador.bruto || 0
+          ),
+        0
+      );
+
+    /*
+      =====================================================
+      6. CONFIRMACIÓN FINAL CON EL MONTO REAL
+      =====================================================
+    */
+
+    const confirmarMonto =
+      window.confirm(
+        `Nómina encontrada: ${formatearDinero(
+          totalFinal
+        )}\n\n` +
+          `Trabajadores con pago: ${trabajadoresFinales.length}\n\n` +
+          "¿Confirmas cerrar esta semana?"
+      );
+
+    if (!confirmarMonto) {
       return;
     }
 
-    const trabajadoresConPago =
-      detalleTrabajadores.filter(
-        (trabajador) =>
-          trabajador.bruto > 0
+    /*
+      =====================================================
+      7. CREAMOS EL DETALLE DE NÓMINA
+      =====================================================
+    */
+
+    const detallesNomina =
+      trabajadoresFinales.map(
+        (trabajador) => ({
+          semana_id:
+            semanaAbierta.id,
+
+          empleado_id:
+            trabajador.empleadoId,
+
+          pago_pieza:
+            Number(
+              trabajador.pagoPasos || 0
+            ),
+
+          pago_hora:
+            Number(
+              trabajador.pagoHoras || 0
+            ),
+
+          total_pago:
+            Number(
+              trabajador.bruto || 0
+            ),
+        })
+      );
+
+    const {
+      error: errorDetalle,
+    } = await supabase
+      .from(
+        "nomina_semanal_detalle"
+      )
+      .insert(detallesNomina);
+
+    if (errorDetalle) {
+      throw errorDetalle;
+    }
+
+    /*
+      =====================================================
+      8. MARCAMOS LAS ASIGNACIONES COMO PAGADAS
+      =====================================================
+    */
+
+    const idsAsignaciones =
+      (
+        asignacionesActuales || []
+      ).map(
+        (registro) => registro.id
       );
 
     if (
-      trabajadoresConPago.length === 0
+      idsAsignaciones.length > 0
     ) {
-      alert(
-        "No hay trabajos terminados para cerrar esta semana."
-      );
-      return;
+      const {
+        error:
+          errorAsignaciones,
+      } = await supabase
+        .from("asignaciones")
+        .update({
+          semana_nomina_id:
+            semanaAbierta.id,
+        })
+        .in(
+          "id",
+          idsAsignaciones
+        );
+
+      if (errorAsignaciones) {
+        throw errorAsignaciones;
+      }
     }
 
-    const confirmar = window.confirm(
-      `¿Cerrar la semana con una nómina bruta de ${formatearDinero(
-        totales.bruto
-      )}?\n\n` +
-        "Solo se incluirán los bultos entregados y los trabajos por hora terminados de esta semana."
+    /*
+      =====================================================
+      9. MARCAMOS LOS TRABAJOS POR HORA COMO PAGADOS
+      =====================================================
+    */
+
+    const idsTrabajosTiempo =
+      (
+        trabajosTiempoActuales || []
+      ).map(
+        (registro) => registro.id
+      );
+
+    if (
+      idsTrabajosTiempo.length > 0
+    ) {
+      const {
+        error:
+          errorTrabajosTiempo,
+      } = await supabase
+        .from("trabajos_tiempo")
+        .update({
+          semana_id:
+            semanaAbierta.id,
+        })
+        .in(
+          "id",
+          idsTrabajosTiempo
+        );
+
+      if (errorTrabajosTiempo) {
+        throw errorTrabajosTiempo;
+      }
+    }
+
+    /*
+      =====================================================
+      10. CERRAMOS LA SEMANA
+      =====================================================
+    */
+
+    const {
+      error: errorCerrarSemana,
+    } = await supabase
+      .from("semanas_nomina")
+      .update({
+        estado: "Cerrada",
+
+        fecha_cierre:
+          new Date().toISOString(),
+
+        total_nomina:
+          Number(totalFinal),
+      })
+      .eq(
+        "id",
+        semanaAbierta.id
+      );
+
+    if (errorCerrarSemana) {
+      throw errorCerrarSemana;
+    }
+
+    /*
+      =====================================================
+      11. OBTENEMOS / CREAMOS LA SEMANA QUE CORRESPONDA
+          A LA FECHA ACTUAL
+      =====================================================
+    */
+
+    const nuevaSemana =
+      await obtenerOCrearSemanaAbierta();
+
+    setSemanaAbierta(
+      nuevaSemana
     );
 
-    if (!confirmar) {
-      return;
-    }
+    setEmpleadoAbierto(null);
 
-    setCerrando(true);
+    mostrarMensaje(
+      `Semana cerrada. Nómina total: ${formatearDinero(
+        totalFinal
+      )}`
+    );
 
-    try {
-      /*
-        1. Creamos el detalle de nómina
-        para cada trabajador que tenga pago.
-      */
-      const detallesNomina =
-        trabajadoresConPago.map(
-          (trabajador) => ({
-            semana_id:
-              semanaAbierta.id,
+    /*
+      =====================================================
+      12. RECARGAMOS LA PANTALLA
+      =====================================================
+    */
 
-            empleado_id:
-              trabajador.empleadoId,
-
-            pago_pieza:
-              Number(
-                trabajador.pagoPasos || 0
-              ),
-
-            pago_hora:
-              Number(
-                trabajador.pagoHoras || 0
-              ),
-
-            total_pago:
-              Number(
-                trabajador.bruto || 0
-              ),
-          })
-        );
-
-      const {
-        error: errorDetalle,
-      } = await supabase
-        .from("nomina_semanal_detalle")
-        .insert(detallesNomina);
-
-      if (errorDetalle) {
-        throw errorDetalle;
-      }
-
-      /*
-        2. Marcamos las asignaciones
-        pagadas con la semana que estamos
-        cerrando.
-      */
-      const idsAsignaciones =
-        asignaciones.map(
-          (registro) => registro.id
-        );
-
-      if (
-        idsAsignaciones.length > 0
-      ) {
-        const {
-          error:
-            errorAsignaciones,
-        } = await supabase
-          .from("asignaciones")
-          .update({
-            semana_nomina_id:
-              semanaAbierta.id,
-          })
-          .in(
-            "id",
-            idsAsignaciones
-          );
-
-        if (errorAsignaciones) {
-          throw errorAsignaciones;
-        }
-      }
-
-      /*
-        3. Marcamos los trabajos por tiempo
-        pagados con la semana cerrada.
-      */
-      const idsTrabajosTiempo =
-        trabajosTiempo.map(
-          (registro) => registro.id
-        );
-
-      if (
-        idsTrabajosTiempo.length > 0
-      ) {
-        const {
-          error:
-            errorTrabajosTiempo,
-        } = await supabase
-          .from("trabajos_tiempo")
-          .update({
-            semana_id:
-              semanaAbierta.id,
-          })
-          .in(
-            "id",
-            idsTrabajosTiempo
-          );
-
-        if (errorTrabajosTiempo) {
-          throw errorTrabajosTiempo;
-        }
-      }
-
-      /*
-        4. Cerramos la semana actual.
-      */
-      const {
-        error: errorCerrarSemana,
-      } = await supabase
-        .from("semanas_nomina")
-        .update({
-          estado: "Cerrada",
-          fecha_cierre:
-            new Date().toISOString(),
-          total_nomina:
-            Number(
-              totales.bruto || 0
-            ),
-        })
-        .eq(
-          "id",
-          semanaAbierta.id
-        );
-
-      if (errorCerrarSemana) {
-        throw errorCerrarSemana;
-      }
-
-      /*
-        IMPORTANTE:
-
-        Ya NO creamos la siguiente semana
-        sumándole 7 días a la anterior.
-
-        Volvemos a resolver cuál es la
-        semana que corresponde a la fecha
-        actual.
-
-        Esto evita que una semana antigua
-        vaya arrastrando fechas incorrectas.
-      */
-      const nuevaSemana =
-        await obtenerOCrearSemanaAbierta();
-
-      setSemanaAbierta(
+    await Promise.all([
+      cargarAsignacionesPendientes(
         nuevaSemana
-      );
+      ),
 
-      setEmpleadoAbierto(null);
+      cargarTrabajosTiempoPendientes(
+        nuevaSemana
+      ),
 
-      mostrarMensaje(
-        `Semana cerrada. Nómina total: ${formatearDinero(
-          totales.bruto
-        )}`
-      );
+      cargarAdeudosPendientes(),
 
-      await Promise.all([
-        cargarAsignacionesPendientes(
-          nuevaSemana
-        ),
+      cargarHistorial(),
+    ]);
+  } catch (error) {
+    console.error(
+      "Error cerrando semana:",
+      error
+    );
 
-        cargarTrabajosTiempoPendientes(
-          nuevaSemana
-        ),
-
-        cargarAdeudosPendientes(),
-
-        cargarHistorial(),
-      ]);
-    } catch (error) {
-      console.error(
-        "Error cerrando semana:",
-        error
-      );
-
-      alert(
-        error.message ||
-          "No se pudo cerrar la semana"
-      );
-    } finally {
-      setCerrando(false);
-    }
+    alert(
+      error.message ||
+        "No se pudo cerrar la semana"
+    );
+  } finally {
+    setCerrando(false);
   }
+}
 
   const fechaCierreSemana =
     semanaAbierta?.fecha_inicio

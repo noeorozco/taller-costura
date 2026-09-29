@@ -620,15 +620,14 @@ export default function AsignacionesPage() {
           </option>
 
           {ordenes.map((orden) => (
-            <option
-              key={orden.id}
-              value={orden.id}
-            >
-              {orden.folio} -{" "}
-              {orden.modelos?.codigo} -{" "}
-              {orden.cliente || "Sin cliente"}
-            </option>
-          ))}
+  <option
+    key={orden.id}
+    value={orden.id}
+  >
+    {orden.modelos?.nombre || "Sin nombre"} -{" "}
+    {orden.cliente || "Sin cliente"}
+  </option>
+))}
         </select>
 
         <label style={etiqueta}>
